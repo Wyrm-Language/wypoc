@@ -777,6 +777,50 @@ def test_a_dispatched_function_registers_itself_at_load():
     assert "doubled" not in [slot.name for slot in image.globals]
 
 
+def test_message_promotion_emits_a_wildcard_reg_msg_for_the_plain_function():
+    """llm-bytecode.md §9: a plain top-level `fn name(...)` that shares a
+    name with a typed `fn [T] name(...)` in the same module is also
+    registered as that message's wildcard (all-nil types) overload, so a
+    receiver with no more specific overload still dispatches - matching the
+    interpreter's own promotion (`register_overload` in
+    wyrm_eval_parse_tree.py). Regression for epic 4/M4: before this, the
+    compiler emitted no `reg_msg` at all for the plain function, so the
+    compiled message only ever had the typed arm.
+    """
+    source = (
+        "class C:\n    slot x: int = 0\n"
+        "fn greet():\n    return \"generic\"\n"
+        "fn [C] greet():\n    return \"specific\"\n"
+    )
+    image = compile_source(source)
+    listing = code_listing(image)
+
+    reg_msg_lines = [line for line in listing if line.startswith("reg_msg")]
+    assert len(reg_msg_lines) == 2
+
+    lnil_lines = [line for line in listing if line.startswith("lnil")]
+    assert len(lnil_lines) == 1  # exactly one wildcard slot: the plain fn's own arity-1 promotion
+
+    tuple_lines = [line for line in listing if line.startswith("tuple")]
+    assert any(line.endswith(", 1 items") for line in tuple_lines)
+
+    # Both reg_msg calls register against the same message identity.
+    message_ids = {line.split()[1] for line in reg_msg_lines}
+    assert len(message_ids) == 1
+
+    # `greet` never becomes a plain global on its own name via the message
+    # path - it's still bound as an ordinary variable too (both namespaces
+    # coexist), same as `_dispatched_fn`'s target never being one.
+    assert "greet" in [slot.name for slot in image.globals]
+
+
+def test_message_promotion_does_not_fire_without_a_typed_overload():
+    """A plain `fn name(...)` with no `fn [T] name(...)` anywhere in the
+    module is an ordinary function only - no message, no reg_msg."""
+    image = compile_source("fn greet():\n    return \"generic\"\n")
+    assert not any(line.startswith("reg_msg") for line in code_listing(image))
+
+
 def test_a_message_send_puts_the_receiver_at_the_window_base():
     listing = body_listing(
         compile_source("fn f(obj):\n    return obj ! go(1)\n"), "f"

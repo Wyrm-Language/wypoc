@@ -3255,6 +3255,7 @@ _PRIMITIVE_TYPE_CHECKS = {
     "list": lambda v: isinstance(v, list),
     "tuple": lambda v: isinstance(v, tuple),
     "dict": lambda v: isinstance(v, dict),
+    "bytes": lambda v: isinstance(v, bytearray),
     "pair": lambda v: isinstance(v, wyrm_builtins.Pair),
     "error": lambda v: wyrm_builtins.is_error(v),
 }
@@ -3408,11 +3409,23 @@ def _decorator_identity(this, *args, **kwargs):
     return sexpr.encode(lookup(_TREE_SLOT, this.attrs))
 
 
+def _decorator_template(this, *args, **kwargs):
+    """`@template X` - the predefined decorator marking X as a template (a
+    tree written to be quoted, whose code may never run; see the epic 10a
+    plan). This POC ignores the marking: it already compiles a body that will
+    not lower to a trapping stub (`stub_unlowered`), and `foo::$ast` already
+    answers for any definition, so the decorator answers X unchanged. It is
+    registered as an ordinary TreeBase message, so a user-defined `template`
+    shadows it like any other decorator. Arguments are accepted and ignored."""
+    return sexpr.encode(lookup(_TREE_SLOT, this.attrs))
+
+
 def install_native_decorators(ctx: dict) -> None:
-    """Registers `@__dump`/`@__identity` as TreeBase messages. Typed on
-    TreeBase rather than registered as wildcards (register_native_method)
-    so they only ever answer for a tree."""
-    for name, fn in (("__dump", _decorator_dump), ("__identity", _decorator_identity)):
+    """Registers `@__dump`/`@__identity`/`@template` as TreeBase messages.
+    Typed on TreeBase rather than registered as wildcards
+    (register_native_method) so they only ever answer for a tree."""
+    for name, fn in (("__dump", _decorator_dump), ("__identity", _decorator_identity),
+                     ("template", _decorator_template)):
         register_overload(name, (TREE_BASE_CLASS,), NativeBody(fn), {}, ctx)
 
 

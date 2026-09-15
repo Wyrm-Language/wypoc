@@ -60,6 +60,7 @@ def compile_module(
     module.stub_unlowered = stub_unlowered
     program = _expand_decorators(program, module_name)
     _collect_definitions(program, module)
+    _collect_promotions(program, module)
     init = module.init
 
     _declare_module_names(program.body, module)
@@ -96,6 +97,38 @@ def _collect_definitions(program, module):
     for node in program.walk():
         if isinstance(node, (ast.FnDef, ast.CoDef, ast.ClassDef)) and node.name:
             module.definitions.setdefault(node.name, node)
+
+
+def _collect_promotions(program, module):
+    """Message promotion (llm-bytecode.md §9, design_c_vm.md §7): the
+    interpreter promotes a plain top-level `fn name(...)` into the wildcard
+    overload of any message `name` that exists, so a receiver with no more
+    specific overload still dispatches to it (`register_overload` in
+    wyrm_eval_parse_tree.py). The two definitions compile independently -
+    the plain `fn` becomes an ordinary global closure, the typed one(s)
+    become `reg_msg` calls - so the compiler has to decide this explicitly,
+    from a first pass over the module's own top-level body, before any
+    lowering happens. A module may mix arities under one name (`fn [Circle]
+    name()` and `fn [Circle, Circle] name(a, b)`), so the plain function is
+    promoted once per distinct arity actually used, not once per name.
+
+    Only true top-level definitions count - a plain `fn` nested inside
+    another function, or a class body's own methods, are unrelated
+    namespaces and never promoted this way.
+    """
+    plain_names = set()
+    dispatched_arities = {}
+    for node in program.body:
+        if isinstance(node, (ast.FnDef, ast.CoDef)):
+            if node.class_target:
+                dispatched_arities.setdefault(node.name, set()).add(len(node.class_target))
+            else:
+                plain_names.add(node.name)
+
+    for name in plain_names:
+        arities = dispatched_arities.get(name)
+        if arities:
+            module.promoted_arities[name] = arities
 
 
 def _expand_decorators(program, module_name):
@@ -400,6 +433,66 @@ def _fn_def(node, module):
     reg = init.push()
     init.emit(opcodes.pack("closure", a0=reg, a1=index, a2=0, f=0))
     init.emit(opcodes.pack_pairable("gset", global_index, reg))
+
+    arities = module.promoted_arities.get(node.name)
+    if arities:
+        _emit_promotion(node, module, arities)
+
+
+def _emit_promotion(node, module, arities):
+    """The `reg_msg` half of message promotion (see `_collect_promotions`):
+    registers the plain function as the wildcard (all-nil types) overload
+    of message `node.name`, once per arity a typed overload of the same
+    name uses.
+
+    This recompiles the body rather than reusing `_fn_def`'s own closure:
+    a message body reserves `P0..P(arity-1)` for its receiver(s) before its
+    own declared parameters (spec 1.1/design_c_vm.md §7), so the plain
+    closure - compiled with no reserved receiver slots at all, its own
+    params starting at P0 - has the wrong frame layout to serve as a
+    message body whenever `arity` isn't 0. The wildcard doesn't reference
+    any specific class, so `dispatch` here is `arity` copies of the
+    function's own global slot - a placeholder: nothing reads a dispatch
+    slot's *value* at runtime (`BytecodeMethod.__call__`/verify.py's
+    P-frame size only ever use `len(dispatch)`), only its count, which is
+    what reserves the P slots.
+
+    Caveat, not exercised by any current sample: a promoted function that
+    declares a `static` would get two independent copies of it (one per
+    compiled closure) rather than one shared cell, since `_declare_statics`
+    runs again for this second compile. Message promotion's own source
+    (llm-bytecode.md §9) doesn't mention statics; this is a narrower gap to
+    close later if a sample ever needs it, not addressed here.
+    """
+    from .functions import compile_callable
+
+    init = module.init
+    message = init.reference([node.name], node.pos)
+    flags = FN_MESSAGE
+    if isinstance(node, ast.CoDef):
+        flags |= FN_COROUTINE
+    own_slot = module.name_slot(node.name)
+
+    for arity in sorted(arities):
+        index, _captures = compile_callable(
+            module,
+            f"{node.name}!",
+            node.params,
+            node.body,
+            node.pos,
+            flags=flags,
+            dispatch=[own_slot] * arity,
+        )
+        mark = init.mark()
+        closure = init.push()
+        init.emit(opcodes.pack("closure", a0=closure, a1=index, a2=0, f=0))
+        base = init.mark()
+        for _ in range(arity):
+            init.emit(opcodes.pack("lnil", a0=init.push()))
+        types = init.push()
+        init.emit(opcodes.pack("tuple", a0=types, a1=opcodes.L(base), f=arity))
+        init.emit(opcodes.pack("reg_msg", a0=message, a1=closure, a2=types))
+        init.free_to(mark)
 
 
 def _dispatched_fn(node, module):

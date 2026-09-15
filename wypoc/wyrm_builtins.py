@@ -13,6 +13,7 @@ cons/car/cdr are plain Python callables (ordinary wyrm functions, no special
 interpreter support needed) implementing Scheme's cons-cell trio - see Pair
 below.
 """
+import struct
 
 
 class Symbol:
@@ -150,6 +151,11 @@ def _format(value, repr_mode: bool, ctx: dict | None = None) -> str:
             node = node.cdr
         tail = "" if node is NIL or node is None else f" . {_format(node, True, ctx)}"
         return f"$[{', '.join(parts)}{tail}]"
+    if isinstance(value, bytearray):
+        # Length-only summary, matching compiler_bc/image.py's
+        # `_static_repr` for a binary static-pool constant - one format
+        # for "a bytes value" rather than two.
+        return f"{len(value)} bytes"
     if isinstance(value, list):
         return "[" + ", ".join(_format(v, True, ctx) for v in value) + "]"
     if isinstance(value, tuple):
@@ -198,13 +204,181 @@ def _to_sym(value) -> "Symbol":
     raise TypeError(f"sym: cannot make a symbol from {type(value).__name__}")
 
 
+def _to_bytes(value) -> bytearray:
+    """`bytes(value)` - the cast into the bytes type (doc/stdlib.md's
+    `### bytes`): an int gives that many zero bytes, a str its UTF-8
+    encoding, and a bytes/bytearray a copy (also reachable as the `copy`
+    message). Backed by a Python `bytearray`, the same "primitive type
+    backed by a mutable native Python container" shape `list` already
+    uses."""
+    if isinstance(value, bool):
+        raise TypeError("bytes: cannot make bytes from bool")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(f"bytes: length must be >= 0 (got {value})")
+        return bytearray(value)
+    if isinstance(value, str):
+        return bytearray(value.encode("utf-8"))
+    if isinstance(value, (bytes, bytearray)):
+        return bytearray(value)
+    raise TypeError(f"bytes: cannot make bytes from {type(value).__name__}")
+
+
 STR = PrimitiveType("str", _to_str)
 INT = PrimitiveType("int", _to_int)
 FLOAT = PrimitiveType("float", _to_float)
 BOOL = PrimitiveType("bool", _to_bool)
 SYM = PrimitiveType("sym", _to_sym)
+BYTES = PrimitiveType("bytes", _to_bytes)
 
-PRIMITIVE_TYPES = {t.name: t for t in (STR, INT, FLOAT, BOOL, SYM)}
+PRIMITIVE_TYPES = {t.name: t for t in (STR, INT, FLOAT, BOOL, SYM, BYTES)}
+
+
+# --------------------------------------------------------------------------
+# bytes messages (doc/stdlib.md's `### bytes`) - registered as wildcard
+# native methods the same way str's substr/list's resize/append are (see
+# register_native_method in wyrm_eval_parse_tree.py and install() below).
+# All receivers are plain Python bytearrays; `b[i]`/`b[i] := v` go through
+# the ordinary indexing path (index_value/set_index) with no bytes-specific
+# code needed there - `bytearray.__getitem__`/`__setitem__` already do the
+# 0-255 value check and the index bounds check Python's own way.
+
+
+def _require_bytes(b, op: str) -> None:
+    if not isinstance(b, bytearray):
+        raise TypeError(f"{op}: not a bytes (got {type(b).__name__})")
+
+
+def _check_bytes_range(b: bytearray, at: int, width: int, op: str) -> None:
+    if at < 0 or at + width > len(b):
+        raise IndexError(f"{op}: range {at}..{at + width} outside 0..{len(b)}")
+
+
+def bytes_append(b, value):
+    """(b ! append(v)) -> appends one byte (v: int 0-255), or every byte of
+    another bytes/UTF-8-encoded str, growing capacity as needed. Returns
+    `b`, so appends chain like list's append does."""
+    _require_bytes(b, "append")
+    if isinstance(value, bool):
+        raise TypeError("append: expected int|bytes|str (got bool)")
+    if isinstance(value, int):
+        if not 0 <= value <= 255:
+            raise ValueError(f"append: byte value out of range (got {value})")
+        b.append(value)
+    elif isinstance(value, str):
+        b.extend(value.encode("utf-8"))
+    elif isinstance(value, (bytes, bytearray)):
+        b.extend(value)
+    else:
+        raise TypeError(f"append: expected int|bytes|str (got {type(value).__name__})")
+    return b
+
+
+def bytes_resize(b, n: int):
+    """(b ! resize(n)) -> sets len(b) to n in place: growing pads with zero
+    bytes, shrinking discards the tail. Never shrinks capacity (a Python
+    bytearray doesn't expose that distinction anyway). Returns `b`."""
+    _require_bytes(b, "resize")
+    if n < 0:
+        raise ValueError(f"resize: n must be >= 0 (got {n})")
+    if n < len(b):
+        del b[n:]
+    elif n > len(b):
+        b.extend(bytes(n - len(b)))
+    return b
+
+
+def bytes_slice(b, start: int, count: int):
+    """(b ! slice(start, count)) -> a new bytes holding a copy of `count`
+    bytes starting at `start`. Faults if the range falls outside
+    0..len(b)."""
+    _require_bytes(b, "slice")
+    if start < 0 or count < 0 or start + count > len(b):
+        raise IndexError(f"slice: range {start}..{start + count} outside 0..{len(b)}")
+    return bytearray(b[start:start + count])
+
+
+def bytes_to_str(b) -> str:
+    """(b ! to_str()) -> UTF-8-decodes the full contents. Faults (raises
+    UnicodeDecodeError, does not substitute or truncate) on any byte
+    sequence that is not valid UTF-8, matching Python's own
+    `bytes.decode("utf-8")` default behavior, which this is built directly
+    on top of - see doc/stdlib.md's `### bytes`."""
+    _require_bytes(b, "to_str")
+    return bytes(b).decode("utf-8")
+
+
+def bytes_copy(b):
+    """(b ! copy()) -> a new bytes holding a copy of the full contents."""
+    _require_bytes(b, "copy")
+    return bytearray(b)
+
+
+def bytes_pack_u8(b, at: int, v: int):
+    _require_bytes(b, "pack_u8")
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 255:
+        raise ValueError(f"pack_u8: value out of range (got {v!r})")
+    _check_bytes_range(b, at, 1, "pack_u8")
+    b[at] = v
+    return b
+
+
+def bytes_pack_i32(b, at: int, v: int):
+    _require_bytes(b, "pack_i32")
+    _check_bytes_range(b, at, 4, "pack_i32")
+    b[at:at + 4] = struct.pack("<i", v)
+    return b
+
+
+def bytes_pack_u32(b, at: int, v: int):
+    _require_bytes(b, "pack_u32")
+    _check_bytes_range(b, at, 4, "pack_u32")
+    b[at:at + 4] = struct.pack("<I", v)
+    return b
+
+
+def bytes_pack_f32(b, at: int, v: float):
+    _require_bytes(b, "pack_f32")
+    _check_bytes_range(b, at, 4, "pack_f32")
+    b[at:at + 4] = struct.pack("<f", v)
+    return b
+
+
+def bytes_pack_f64(b, at: int, v: float):
+    _require_bytes(b, "pack_f64")
+    _check_bytes_range(b, at, 8, "pack_f64")
+    b[at:at + 8] = struct.pack("<d", v)
+    return b
+
+
+def bytes_unpack_u8(b, at: int) -> int:
+    _require_bytes(b, "unpack_u8")
+    _check_bytes_range(b, at, 1, "unpack_u8")
+    return b[at]
+
+
+def bytes_unpack_i32(b, at: int) -> int:
+    _require_bytes(b, "unpack_i32")
+    _check_bytes_range(b, at, 4, "unpack_i32")
+    return struct.unpack_from("<i", b, at)[0]
+
+
+def bytes_unpack_u32(b, at: int) -> int:
+    _require_bytes(b, "unpack_u32")
+    _check_bytes_range(b, at, 4, "unpack_u32")
+    return struct.unpack_from("<I", b, at)[0]
+
+
+def bytes_unpack_f32(b, at: int) -> float:
+    _require_bytes(b, "unpack_f32")
+    _check_bytes_range(b, at, 4, "unpack_f32")
+    return struct.unpack_from("<f", b, at)[0]
+
+
+def bytes_unpack_f64(b, at: int) -> float:
+    _require_bytes(b, "unpack_f64")
+    _check_bytes_range(b, at, 8, "unpack_f64")
+    return struct.unpack_from("<d", b, at)[0]
 
 
 class WyrmError:
@@ -499,10 +673,11 @@ def copy(x):
 def length(x) -> int:
     """(len x) -> the number of elements in x, for every collection type
     wypoc currently has: str (chars), list (wyrm arrays), tuple, dict
-    (entries), and Pair chains (walked car-by-car out to the terminating
-    NIL - '() itself has length 0). An improper list (one whose final cdr
-    isn't NIL) has no well-defined length, same as Scheme's own `length`."""
-    if isinstance(x, (str, list, tuple, dict)):
+    (entries), bytes (byte count), and Pair chains (walked car-by-car out
+    to the terminating NIL - '() itself has length 0). An improper list
+    (one whose final cdr isn't NIL) has no well-defined length, same as
+    Scheme's own `length`."""
+    if isinstance(x, (str, list, tuple, dict, bytearray)):
         return len(x)
     if x is NIL:
         return 0
@@ -541,9 +716,17 @@ def resize(lst, count: int):
     item back out (`lst[i]`) just hands back the Unset value itself rather
     than raising the way an unassigned variable's lookup would. A message
     (`!`), not a plain call, since it's a method on list values - see
-    register_native_method (wyrm_eval_parse_tree.py). Returns `lst`."""
+    register_native_method (wyrm_eval_parse_tree.py). Returns `lst`.
+
+    `resize` is also bytes's message of the same name (doc/stdlib.md's
+    `### bytes`) - both land on this one wildcard `Method` overload (see
+    register_native_method: a second call under the same name would
+    replace, not add to, the first), so a bytearray receiver is routed to
+    bytes_resize here rather than getting its own registration."""
     from wypoc.wyrm_eval_parse_tree import UNSET
 
+    if isinstance(lst, bytearray):
+        return bytes_resize(lst, count)
     if not isinstance(lst, list):
         raise TypeError(f"resize: not a list (got {type(lst).__name__})")
     if count < 0:
@@ -579,7 +762,14 @@ def append(lst, value):
     place, growing it by one. A message (`!`), not a plain call, since it's
     a method on list values - see register_native_method
     (wyrm_eval_parse_tree.py). Returns `lst`, so appends chain
-    (`l ! append(1) ! append(2)`)."""
+    (`l ! append(1) ! append(2)`).
+
+    `append` is also bytes's message of the same name (doc/stdlib.md's
+    `### bytes`) - see resize's docstring above for why a bytearray
+    receiver is routed to bytes_append here instead of its own
+    registration."""
+    if isinstance(lst, bytearray):
+        return bytes_append(lst, value)
     if not isinstance(lst, list):
         raise TypeError(f"append: not a list (got {type(lst).__name__})")
     lst.append(value)
@@ -857,3 +1047,19 @@ def install(ctx: dict) -> None:
     register_native_method("append", append, ctx)
     register_native_method("connect", signal_connect, ctx)
     register_native_method("disconnect", signal_disconnect, ctx)
+    # bytes's append/resize share list's Method overload (see resize's
+    # docstring above) - only the remaining bytes-only message names need
+    # their own registration here.
+    register_native_method("slice", bytes_slice, ctx)
+    register_native_method("to_str", bytes_to_str, ctx)
+    register_native_method("copy", bytes_copy, ctx)
+    register_native_method("pack_u8", bytes_pack_u8, ctx)
+    register_native_method("pack_i32", bytes_pack_i32, ctx)
+    register_native_method("pack_u32", bytes_pack_u32, ctx)
+    register_native_method("pack_f32", bytes_pack_f32, ctx)
+    register_native_method("pack_f64", bytes_pack_f64, ctx)
+    register_native_method("unpack_u8", bytes_unpack_u8, ctx)
+    register_native_method("unpack_i32", bytes_unpack_i32, ctx)
+    register_native_method("unpack_u32", bytes_unpack_u32, ctx)
+    register_native_method("unpack_f32", bytes_unpack_f32, ctx)
+    register_native_method("unpack_f64", bytes_unpack_f64, ctx)

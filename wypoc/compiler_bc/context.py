@@ -437,6 +437,12 @@ class ModuleContext:
         # Every fn/co/class this module defines, by name - what `foo::$ast`
         # reads.  Built before lowering, from the tree decorators left behind.
         self.definitions = {}
+        # name -> set of arities: every arity at which this module defines a
+        # typed `fn [T, ...] name(...)` sharing a name with a plain top-level
+        # `fn name(...)` - message promotion (llm-bytecode.md §9). Built by
+        # module._collect_promotions before lowering; `_fn_def` reads it to
+        # decide whether the plain function also needs a wildcard `reg_msg`.
+        self.promoted_arities = {}
         # Whether a function body that will not lower becomes a trapping stub
         # rather than failing the whole module (see functions.compile_callable).
         self.stub_unlowered = True

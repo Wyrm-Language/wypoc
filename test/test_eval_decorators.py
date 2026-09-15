@@ -469,3 +469,24 @@ def test_samples_dir_is_where_the_conformance_script_lives():
     import os
 
     assert os.path.isfile(os.path.join(SAMPLES_DIR, "decolib.wy"))
+
+
+def test_template_decorator_is_a_pass_through():
+    """`@template` (epic 10a) marks a tree as a template; this POC ignores the
+    marking and answers the definition unchanged, so it still binds and runs."""
+    from wypoc.wyrm_eval_parse_tree import call_value
+
+    ctx = run("@template\nfn f():\n    return 3\n")
+    assert call_value(ctx["f"].value, [], {}) == 3
+
+
+def test_a_user_defined_template_decorator_shadows_the_predefined_one():
+    from wypoc.wyrm_eval_parse_tree import call_value
+
+    src = (
+        "fn [TreeBase] template():\n"
+        "    return $['fn, 'f, [], nil, nil, [], [], [$['return, $['int, 9]]]]\n"
+        "@template\nfn f():\n    return 0\n"
+    )
+    ctx = run(src)
+    assert call_value(ctx["f"].value, [], {}) == 9

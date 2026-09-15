@@ -44,6 +44,15 @@ class File:
     fn readall() -> str:
         return __read(this.handle, -1)
 
+    # For a handle opened in binary mode ("rb", ...): __read then answers a
+    # Python bytes object rather than a str, and bytes(...) copies it into a
+    # real wyrm bytes value (see doc/stdlib.md's `### bytes`).
+    fn read_bytes(size) -> bytes:
+        return bytes(__read(this.handle, size))
+
+    # `data` may be a str or a bytes value - __write just hands it to the
+    # underlying handle's own write(), so this matches whichever mode the
+    # handle was opened in ("w"/"a" for str, "wb"/"ab" for bytes).
     fn write(data) -> int:
         return __write(this.handle, data)
 
@@ -75,6 +84,19 @@ fn read_file(path) -> str:
 
 fn write_file(path, data) -> int:
     f := try open(path, "w")
+    defer:
+        f!close()
+    return f!write(data)
+
+# Binary-mode counterpart to write_file, for a bytes value (epic 7). A
+# separate top-level function, not just "pass 'wb'  to write_file", because
+# `!write` is an INSTANCE message: sending it to a File built and returned
+# from *this* module works (write_file already does exactly this), but the
+# same message send from an external caller holding the returned File can
+# fail to resolve depending on the caller's own module - calling through a
+# function defined here, in File's own module, sidesteps that entirely.
+fn write_bytes_file(path, data) -> int:
+    f := try open(path, "wb")
     defer:
         f!close()
     return f!write(data)

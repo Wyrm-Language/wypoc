@@ -49,16 +49,10 @@ REFUSED = {
 }
 
 # Samples that compile but whose output the VM cannot match, with the gap that
-# owns them. One entry, and it is a *lowering* gap rather than a VM one.
-DIVERGES = {
-    "eval_messages.wy": (
-        "message promotion: the interpreter turns a plain `fn describe()` into "
-        "the wildcard overload of the message `describe` becomes, so a receiver "
-        "with no specific overload still dispatches. The compiler emits no "
-        "`reg_msg` for the plain function, so the compiled message has only the "
-        "typed arm - see doc/llm-bytecode.md §9."
-    ),
-}
+# owns them. Empty: message promotion (eval_messages.wy's old entry here) is
+# now compiler_bc/module.py's _collect_promotions/_emit_promotion - see
+# doc/llm-bytecode.md §9.
+DIVERGES = {}
 
 
 def sample_names():
@@ -143,6 +137,7 @@ TYPE_CHECKS = (
     ("nil", "nil"), ("bool", "true"), ("int", "7"), ("uint", "7"),
     ("float", "1.5"), ("str", '"x"'), ("sym", "'ready"), ("list", "[1]"),
     ("tuple", "(1, 2)"), ("pair", "cons(1, 2)"), ("error", 'error("e")'),
+    ("bytes", "bytes(0)"),
 )
 
 

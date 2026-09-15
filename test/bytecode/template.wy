@@ -1,0 +1,26 @@
+# Epic 10a M0 golden fixture: `@template` + `name::$ast`.
+#
+# `twice` is marked as a template and still runs - the marking only
+# relieves a lowering failure, it does not change what compiles. Its tree
+# is reachable through `twice::$ast`, and it is the same tree whether it
+# arrives raw (the bytecode VM answers the definition's sexpr directly) or
+# boxed (the tree walker hands decorators a TreeBase). `_shadowed` uses
+# `this` in a plain fn - uncompilable unmarked under strict lowering - and
+# is never called; only the marking lets it exist.
+
+@template
+fn twice(x):
+    return x + x
+
+@template
+fn _shadowed():
+    return this
+
+fn describe(t):
+    if t is nil:
+        return "no tree"
+    return "have tree"
+
+t := twice::$ast
+println(describe(t))
+println(twice(21))

@@ -543,9 +543,19 @@ def execute(module, frame):
                         f"expected a message identity and a closure, got "
                         f"{method!r} and {body!r}", op,
                     )
-                signature = get(a2)
+                raw_signature = get(a2)
+                raw_signature = raw_signature if isinstance(raw_signature, tuple) else (raw_signature,)
+                # A `nil` entry is the wildcard constraint (doc/wyc-format.md
+                # §6.3, §8.6): resolve_overload's wildcard check tests
+                # Python's own `None`, so a bytecode NIL read out of a
+                # register - wyrm_builtins.NIL, not None - has to be
+                # translated here, the one place a runtime value becomes a
+                # dispatch constraint.
+                signature = tuple(
+                    None if item is wyrm_builtins.NIL else item for item in raw_signature
+                )
                 method.add_overload(
-                    tuple(signature) if isinstance(signature, tuple) else (signature,),
+                    signature,
                     ev.NativeBody(BytecodeMethod(module, body.index)),
                     {},
                 )
