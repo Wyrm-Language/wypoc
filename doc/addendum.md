@@ -114,16 +114,15 @@ wypoc extension - it still belongs in `doc/language-spec.md` in the reference
 implementation, and this section is the record until it lands there.
 
 Implementation: `cli.check_imports` (the build-time walk), and
-`wyrm_eval_parse_tree.check_import_cycle` over the one import stack both
-engines share.
+`wyrm_eval_parse_tree.check_import_cycle` over the one import stack the
+interpreter keeps.
 
-The base spec doesn't say what a cyclic import means, and the two engines
-answered differently by accident. Both publish a module in the cache before
-running its body (`wyrm_eval_parse_tree.py`'s "cache before eval so circular
-imports don't infinite-loop", and §7.1 step 6 of `doc/wyc-format.md`), so a
-module reached mid-cycle is observable in a half-initialized state: its
-globals hold whatever its body has assigned so far, and which of them that is
-depends on statement order in a file the reader may never have opened.
+The base spec doesn't say what a cyclic import means. Because wypoc
+publishes a module in the cache before running its body (so `::`
+navigation works while a package initialises), a module reached mid-cycle
+is observable in a half-initialized state: its globals hold whatever its
+body has assigned so far, and which of them that is depends on statement
+order in a file the reader may never have opened.
 
 **The import graph must be acyclic.** A cycle is a diagnostic, reported
 against the import statement that closes it and naming the whole path, in
@@ -141,8 +140,7 @@ This buys three things:
 - **Every name is bindable at import time.** With no cycles there is no
   moment at which a dependency is visible but incomplete, so an importing
   module can bind everything it needs from a dependency the instant that
-  dependency's body has run. This is what lets the bytecode VM drop deferred
-  binding entirely (see below).
+  dependency's body has run.
 - **Publish-before-init changes job.** The mechanism stays, but it stops
   being a way to *survive* cycles and becomes the way to *detect* them: a
   module found in the cache in the initializing state proves a cycle, and
@@ -153,31 +151,25 @@ a module boundary. `class A(foo::B)` in one module and `class B(bar::A)` in
 another is now a compile error. The remedies are Go's - merge the two
 modules, or hoist the shared piece into a third that both import.
 
-Cycle detection lives in the build driver, not in the bytecode compiler:
-`compile_module` sees one parsed program and never the graph, while
-`cli.check_imports` already walks every import transitively to resolve it to
-a file. Detection is that walk with a visiting-stack instead of a flat
-visited set, so `--check` and `--build-bc` share one implementation and the
-tree walker enforces the same rule at `import` time.
+Cycle detection lives in one walk: `check_imports` already walks every
+import transitively to resolve it to a file. Detection is that walk with a
+visiting-stack instead of a flat visited set, so `--check` shares one
+implementation with cycle reporting and the tree walker enforces the same
+rule at `import` time.
 
 ## Wildcard ambiguity is an error at the point of use
 
 **Status: implemented**, except that the diagnostic is raised when the name is
 read rather than refused at compile time - see the note at the end of this
-section. Resolves what `doc/wyc-format.md` §10 listed as undecided ("Wildcard
-shadowing").
+section.
 
-Implementation: `wyrm_eval_parse_tree._merge_wildcard_name` and `AmbiguousName`
-for the tree walker; `vm/link.fill_from_wildcard` and `LoadedModule.fill` for
-the bytecode VM.
+Implementation: `wyrm_eval_parse_tree._merge_wildcard_name` and `AmbiguousName`.
 
 The base spec permits `import a::*` and `import b::*` together but never says
-what happens when both export `mix`. The two engines disagree, and neither
-answer was chosen: the tree walker copies names into the importing scope as
-it goes, so the **last** import wins; the VM walks a registered search list
-and returns on the first hit, so the **first** one wins. Both are artifacts
-of a data structure - assignment into a dict, versus early return from a loop
-- rather than semantics anyone picked.
+what happens when both export `mix`. Copying names into the importing scope
+as the imports run would let the **last** import silently win - an artifact
+of a data structure (assignment into a dict) rather than semantics anyone
+picked.
 
 Neither is right. Silent shadowing by import order means adding an export to
 a library can change the meaning of a downstream module that never mentioned
@@ -214,77 +206,12 @@ are a hard import-time error"), so the two namespaces now fail the same way
 for the same reason.
 
 Because import cycles are illegal, the whole dependency graph is known before
-any module in it is compiled, so this *could* be a compile-time diagnostic:
-the compiler would know each dependency's export set and could refuse the
-ambiguous program outright.
+any module in it runs, so this *could* be a compile-time diagnostic:
+a whole-program build would know each dependency's export set and could
+refuse the ambiguous program outright.
 
-**It is not one yet.** `compile_module` takes a single parsed program and never
-loads a dependency - there is no whole-program build for it to hang off - so
-both engines detect the collision when the name is filled and report it when
-the name is read. The observable rule is the one this section describes either
-way; what moves, when a whole-program build exists, is only how early the
-error arrives.
-
-## Name binding without relocations (bytecode VM)
-
-**Status: implemented.** This one is a `doc/wyc-format.md` change rather than
-a language change; it is recorded here because it is a consequence of the two
-rules above. The format spec now describes the result: §7.2, §7.3, the new
-§8.11 `free` section, and Appendix A.
-
-The `.wyc` format reached names through a `relocations` table: a symbol table
-of every external name, with a parallel bind table filled in batches (a
-module's set at init's `resolve`, a function's set at its first call) so that
-`rget`/`rset`/`msg`/`getmsg` could be bind-check-free table reads.
-
-The table was doing three unrelated jobs at once - naming symbols to bind,
-holding path literals for `import` and `import_star` (both of which read
-`reloc.path` directly and never touch the bind table), and registering a
-wildcard namespace in a search list - and of its six kinds only *message* was
-ever branched on, the other five resolving identically.
-
-With cycles illegal, the deferred-binding machinery that motivated the split
-has no remaining job, and the design collapses: **a module's global slots are
-its bind table.** The compiler already resolves names lexically for globals,
-including allocating a distinct slot for a block-local `var` that shadows a
-module name (`add_shadow_global`); relocations were the one place it gave up
-and handed the question to a runtime ladder.
-
-- A name the module references but does not define is a global slot that
-  starts Unset, exactly like a declared-but-unassigned variable. The bespoke
-  NotFound error value disappears; an unresolved name is Unset.
-- `import` binds its slots directly. A wildcard import fills still-Unset
-  *free-name* slots - iterating the importer's free names and asking the
-  dependency, not iterating the dependency's exports, so the cost is
-  proportional to what this module actually uses and a dependency's export
-  set is not part of its ABI. Builtins fill whatever remains, last, which is
-  what implements the layered precedence above.
-- `foo::bar::baz` is an ordinary global slot bound during the import that
-  makes it reachable. The prefix-import behavior stays, because
-  `import a::b::c` remains ambiguous between a submodule and a member.
-- `rget`/`rset` fold into `gget`/`gset`; `resolve` (`0x07`) and both `u` sets
-  are removed.
-
-Message identities keep a table of their own. They resolve in a namespace
-separate from variables - a module may have an unrelated `describe` variable
-and `describe` message - and an unqualified message name *creates* the
-identity when nothing has it yet, neither of which folds into a global slot.
-That table is single-purpose, which is the point: what remains is one table
-that means one thing.
-
-**Imports need no table at all.** A path is a constant string, which the
-statics pool already holds and which the `free` list already uses as its key;
-a wildcard's except-list is a window of interned symbols, read the way
-`tuple`/`list`/`dict` already read theirs. So `import` takes a static, and
-`import_star` takes a static plus a base and a count:
-
-    lsym L0 <- sym#File
-    lsym L1 <- sym#StreamReader
-    import_star static#3 except L0, 2 names
-
-The test of whether something deserves a table is whether it caches a binding.
-A message identity does, and keeps one. An import path does not - it is read
-once, split, and handed to the loader - so it became operands instead. That
-also disposes of the last oddity in the old scheme: a wildcard entry could
-never be deduplicated with anything else, because each carried its own
-except-list. Nothing to deduplicate now.
+**It is not one yet.** A single parsed program never loads a dependency, so
+the collision is detected when the name is filled and reported when the name
+is read. The observable rule is the one this section describes either way;
+what moves, when a whole-program build exists, is only how early the error
+arrives.

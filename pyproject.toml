@@ -28,11 +28,10 @@ wyrm-lsp = "wypoc.lsp:main"
 wyrm-dap = "wypoc.dap.server:main"
 
 [tool.setuptools]
-packages = ["wypoc", "wypoc.dap", "wypoc.compiler_bc", "wypoc.vm"]
+packages = ["wypoc", "wypoc.dap"]
 
 [tool.setuptools.package-data]
 wypoc = ["*.gram", "corelib/**/*.wy"]
-"wypoc.compiler_bc" = ["include/wyrm/*.h"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

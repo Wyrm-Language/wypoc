@@ -12,7 +12,6 @@ uv.lock
 *~
 *.swp
 *.bak
-*.wyc
 .pytest_cache
 CMakeSettings.json
 cmake-build-*

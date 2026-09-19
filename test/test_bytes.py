@@ -9,7 +9,6 @@ import struct
 import pytest
 
 from wypoc import wyrm_builtins
-from wypoc.compiler_bc import bsonlite
 from wypoc.parse import parse
 from wypoc.wyrm_eval_parse_tree import Variable, eval_program
 
@@ -176,24 +175,16 @@ def test_pack_f64_and_unpack_f64():
     assert values["x"] == 1.5
 
 
-def test_pack_i32_matches_bsonlites_own_int32_encoding():
-    """bsonlite (compiler_bc/bsonlite.py) encodes a plain int as TAG_INT32 +
-    a little-endian 4-byte payload via `struct.pack("<i", value)` - the same
-    encoding pack_i32 must produce, so a compiled image's static pool and a
-    runtime-built bytes value agree on the wire format for the same int."""
+def test_pack_i32_is_little_endian_twos_complement():
     value = -12345
     values = run(f"b := bytes(4)\nb!pack_i32(0, {value})")
-    tag, payload = bsonlite._value(value)
-    assert tag == bsonlite.TAG_INT32
-    assert bytes(values["b"]) == payload
+    assert bytes(values["b"]) == struct.pack("<i", value)
 
 
-def test_pack_f64_matches_bsonlites_own_double_encoding():
+def test_pack_f64_is_little_endian_ieee754():
     value = 3.5
     values = run(f"b := bytes(8)\nb!pack_f64(0, {value})")
-    tag, payload = bsonlite._value(value)
-    assert tag == bsonlite.TAG_DOUBLE
-    assert bytes(values["b"]) == payload
+    assert bytes(values["b"]) == struct.pack("<d", value)
 
 
 def test_unpack_range_check_faults():
@@ -221,13 +212,3 @@ def test_is_bytes_matches_only_bytes():
 def test_str_of_bytes_renders_as_n_bytes():
     values = run('s := str(bytes(3))')
     assert values["s"] == "3 bytes"
-
-
-def test_str_of_bytes_matches_the_static_pool_disassembly_format():
-    """str(b) is documented (doc/stdlib.md) to mirror the length-only
-    summary compiler_bc/image.py's `_static_repr` already prints for a
-    binary static-pool constant - same format, not a second one."""
-    from wypoc.compiler_bc.image import _static_repr
-
-    b = run("b := bytes(5)")["b"]
-    assert wyrm_builtins._to_str(b) == _static_repr(bytes(b))

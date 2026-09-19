@@ -662,12 +662,6 @@ class NativeBody:
 class ReadyValue:
     """Sits where an expression node would, holding a value that is already
     computed - the declarative twin of NativeBody.
-
-    A class realised from a compiled image (wypoc/vm/) has no syntax tree: a
-    slot's default arrives as a constant out of the image's static pool, not
-    as an expression to evaluate. Wrapping it lets such a class use the same
-    `Class`/`SlotDef` shapes an interpreted one does, so instantiation,
-    inheritance and dispatch stay one implementation.
     """
 
     __slots__ = ("value",)
@@ -742,12 +736,13 @@ class AmbiguousName:
     `_AmbiguousMessage`, and the same rule from doc/addendum.md's "Wildcard
     ambiguity is an error at the point of use".
 
-    Binding it rather than picking a winner is the whole point: the two
-    engines used to disagree about which import won (the walker's copy-as-you-
-    go made it the last, the VM's search list made it the first), and neither
-    was a decision. Reading the name is now an error naming both sources, and
-    it stays an error until something in layer 1 - a local definition, or an
-    explicit `import palette::mix` - shadows it.
+    Binding it rather than picking a winner is the whole point: silently
+    letting one import win by order (say, the last import overwriting the
+    first in the scope dict) would make the program's meaning depend on
+    import order rather than a rule anyone chose. Reading the name is now
+    an error naming both sources, and it stays an error until something in
+    layer 1 - a local definition, or an explicit `import palette::mix` -
+    shadows it.
     """
 
     __slots__ = ("name", "first", "second")
@@ -813,10 +808,9 @@ _module_cache: dict = {}
 def module_cache() -> dict:
     """Every module loaded so far, by `::`-joined name.
 
-    One process, one instance of a module, whichever kind it is: the bytecode
-    VM publishes an image-backed module here too (doc/wyc-format.md 7.1 step
-    6), so an interpreted `import` of a name a compiled module already brought
-    in gets that same module rather than loading a second copy from source.
+    One process, one instance of a module: an interpreted `import` of a name
+    already in the cache gets that same module rather than loading a second
+    copy from source.
     """
     return _module_cache
 
@@ -840,8 +834,7 @@ def import_stack() -> list:
 def check_import_cycle(key: str) -> None:
     """Raise if importing `key` would close a cycle.
 
-    Both engines consult the module cache to answer "already loaded?", and a
-    module part-way through its own top level is in that cache (published
+    A module part-way through its own top level is in the cache (published
     early, so `::` navigation works while a package initialises). Before the
     addendum's rule that was the point: a cycle handed back a half-built
     module rather than recursing forever. Now it is the detector - the cache
@@ -946,11 +939,7 @@ def _declared_names(ctx: dict, baseline: dict) -> frozenset:
 
 def wildcard_exports(mod) -> "frozenset | None":
     """The names `import mod::*` may take from `mod`, or None when that isn't
-    known and the caller should fall back to offering everything.
-
-    A compiled module answers from its exports table, which is already exactly
-    this: the globals its own code defines, with block-local shadow slots left
-    out (doc/wyc-format.md 8.10)."""
+    known and the caller should fall back to offering everything."""
     declared = getattr(mod, "declared_names", None)
     if declared is not None:
         return declared
@@ -1000,15 +989,6 @@ def import_module(path_segments, roots=None, dynamic: bool = True) -> Module:
 
     resolved = wyrm_modules.resolve_module_file(path_segments, roots)
     if resolved is None:
-        # No source anywhere - but a compiled image is a module too, and this
-        # is the one place the interpreter reaches for one. Source keeps
-        # winning where both exist: this evaluator is what a `.wy` file is
-        # validated against, so an image beside it must not quietly stand in.
-        image = wyrm_modules.resolve_image_file(path_segments, roots)
-        if image is not None:
-            from wypoc.vm import imports as vm_imports
-
-            return vm_imports.load_image(image[0], key)
         searched = roots if roots is not None else wyrm_modules.search_paths()
         raise ImportError(f"no module named {key!r} (searched: {', '.join(searched)})")
     file_path, is_package = resolved
@@ -1240,8 +1220,7 @@ def _adopt_messages(mod: "Module", ctx: dict) -> None:
     other way, listing runtime message invocation among the things a static
     import disallows. Treat this call as a wypoc convenience that predates
     a proper answer to "what makes an imported module's messages
-    dispatchable"; a compiled implementation does not copy it (see
-    compiler_bc/module.py).
+    dispatchable"; a later implementation does not copy it.
 
     A name this module already defines wins: an import brings in behaviour,
     and quietly replacing a local definition with an imported one would be
@@ -1964,11 +1943,7 @@ def _expr_attr(node, ctx):
 
 
 def attr_value(obj, name: str):
-    """`obj.name` - the property namespace, given a value rather than a node.
-
-    Value-level so the bytecode VM's `getattr` reaches the same rules this
-    evaluator's `.` does (one implementation, no drift).
-    """
+    """`obj.name` - the property namespace, given a value rather than a node."""
     if isinstance(obj, CoroutineInstance) and name == "value":
         if not obj._finished:
             return wyrm_builtins.error(f"coroutine {obj.node.name!r} has not finished")
@@ -2033,11 +2008,7 @@ def _expr_index(node, ctx):
 
 def index_value(obj, idx):
     """`obj[idx]`, given values - a failed lookup is an error *value*, not an
-    exception, so `try`/`catch` and the VM's `jerr` can see it.
-
-    Value-level so the bytecode VM's `getidx` reaches these exact rules,
-    including a string indexing to a codepoint and a missing dict key
-    answering Unset.
+    exception, so `try`/`catch` can see it.
     """
     if isinstance(obj, str):
         try:
@@ -2638,8 +2609,7 @@ def _instantiate_gen(cls: "Class", positional, kwargs):
     overload = _try_resolve_overload(method, [inst]) if method is not None else None
     if overload is not None:
         if isinstance(overload.node, (NativeBody, ast.CoDef)):
-            # No wyrm body to trampoline: a native init (which is what a
-            # compiled class's init is - see wypoc/vm/) runs as itself.
+            # No wyrm body to trampoline: a native init runs as itself.
             result = call_overload(overload, [inst], positional, kwargs)
         else:
             result = yield _TailCall(lambda: _make_overload_activation(overload, [inst], positional, kwargs))
@@ -2655,10 +2625,6 @@ def new_instance(cls: "Class") -> "ClassInstance":
     """A fresh instance with every slot at its declared default (or its
     type's zero value) and every signal at a fresh subscriber list - built,
     but not yet `init`ed.
-
-    The construction half of `instantiate`, on its own because the bytecode
-    VM's `new_instance` instruction is exactly this and nothing else (see
-    doc/wyc-format.md 6.3).
     """
     all_slots = cls.all_slots()
     all_signals = cls.all_signals()
@@ -2678,7 +2644,7 @@ def new_instance(cls: "Class") -> "ClassInstance":
     inst = ClassInstance(cls)
     for slot_name, (slot_def, owner) in all_slots.items():
         if isinstance(slot_def.default, ReadyValue):
-            value = slot_def.default.value  # a compiled class: see ReadyValue
+            value = slot_def.default.value
         elif slot_def.default is not None:
             value = eval_expr(slot_def.default, owner.closure)
         else:

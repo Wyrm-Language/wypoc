@@ -1,2 +1,0 @@
-# hello_1.wy - the simplest possible program: one call, no variables.
-print("Hello World\n")

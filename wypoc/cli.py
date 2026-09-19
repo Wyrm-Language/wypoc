@@ -6,12 +6,9 @@ Usage:
     wyrm                                    (interactive REPL)
     wyrm --tui                              (interactive REPL, full screen)
     wyrm [interpreter options] script.wy [script args...]
-    wyrm --vm [interpreter options] script.wy [script args...]
-    wyrm [interpreter options] module.wyc [script args...]
     wyrm [interpreter options] -c "code" [args...]
     wyrm [interpreter options] -m mod::sub [script args...]
     wyrm --dump-wys [-o out.wys] module.wy
-    wyrm --build-bc [-o dir] [--emit wya,c,wyc] module.wy
     wyrm --check script.wy
     wyrm --config name=value [--config ...]  (set an option and exit)
 
@@ -58,34 +55,8 @@ Interpreter options (must come before the script path):
                      unless -o is given. A `.wys` file is a compiled unit,
                      not source - `wyrm script.wys` runs one directly,
                      without re-parsing or re-expanding anything.
-    --build-bc      compile `module.wy` to bytecode (see doc/llm-bytecode.md)
-                     instead of running it, writing the three containers of
-                     one image - `module.wy_a` (the ASCII listing),
-                     `module.c` (C arrays) and `module.wyc` (binary) - next
-                     to the source. The compiler is fail-loud: a construct
-                     it does not support is an error naming the construct
-                     and its line, never wrong bytes. The one exception is a
-                     whole function body that will not lower - a template
-                     never meant to be called, say - which becomes a stub
-                     that traps if it is called, reported on stderr
-    --vm            run `script.wy` on the bytecode VM instead of the tree
-                     walker: compile it to a module image, cache that image
-                     as `<script_dir>/__wycache__/script.wyc`, and run it -
-                     and on a later run, if the cached image is newer than
-                     the source, skip both the parse and the compile and
-                     just run it, the way Python reuses a `__pycache__`
-                     `.pyc`. An unwritable cache directory costs the cache,
-                     not the run. Compiling is fail-loud the same way
-                     --build-bc is
-    --emit list     with --build-bc, emit only these containers: a comma-
-                     separated subset of `wya,c,wyc` (default: all three)
-    --strip         with --build-bc, leave out the debug section (the source
-                     file name and the line table). The VM ignores it either
-                     way; the disassembler and the DAP adapter are what read
-                     it, so strip only what ships
     -o path         with --dump-wys, write the output to `path` instead of
-                     stdout; with --build-bc, the directory to write the
-                     compiled files into instead of alongside the source
+                     stdout
     --dbus-session  connect to the D-Bus session bus before running the
                      script (needs the `dbus` extra - see wypoc/wyrm_dbus.py
                      and corelib/std/dbus.wy), so `dbus::register_object`/
@@ -104,9 +75,7 @@ default, created automatically like Python's __pycache__, or the
 `global_cache` directory from ~/.wyrm/config instead, if one is set - see
 wypoc/cache.py. A hit skips parsing entirely; a miss parses as usual and
 populates the cache for next time (silently skipped if the cache directory
-can't be created or written to). `--vm` caches in the same directory, but
-a compiled `script.wyc` image rather than a pickled tree - see the flag
-above and wypoc/cache.py.
+can't be created or written to).
 
 Every mode that has a script file at all - a plain run, --dump-wys,
 --check - honors ~/.wyrm/config the same way the
@@ -291,108 +260,6 @@ def _cycle_message(stack: list, depth: int, spelling: str) -> str:
     return "\n".join(lines)
 
 
-def build_bytecode(tree, filename: str, output_dir, emit: "str | None",
-                   debug: bool = True) -> int:
-    """--build-bc: compile one module to its three bytecode containers.
-
-    The module name is the source file's stem, which is what a single-file
-    build has to assume until `import` lowering gives the compiler a real
-    module path to work from.
-    """
-    from wypoc.compiler_bc import CompileError, compile_module
-
-    containers = ("wya", "c", "wyc")
-    if emit is not None:
-        chosen = [part.strip() for part in emit.split(",") if part.strip()]
-        unknown = [part for part in chosen if part not in containers]
-        if unknown:
-            print(f"wyrm: --emit: unknown container(s) {', '.join(unknown)}; "
-                  f"expected a subset of {','.join(containers)}", file=sys.stderr)
-            return 2
-        containers = tuple(part for part in containers if part in chosen)
-
-    module_name = os.path.splitext(os.path.basename(filename))[0]
-    try:
-        image = compile_module(tree, module_name, filename, debug=debug)
-    except CompileError as e:
-        print(f"wyrm: {filename}: {e}", file=sys.stderr)
-        return 1
-
-    directory = output_dir or os.path.dirname(os.path.abspath(filename))
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    stem = os.path.join(directory, module_name)
-    written = []
-    for container in containers:
-        path = f"{stem}.{'wy_a' if container == 'wya' else container}"
-        if container == "wyc":
-            with open(path, "wb") as f:
-                f.write(image.to_wyc())
-        else:
-            with open(path, "w") as f:
-                f.write(image.to_wya() if container == "wya" else image.to_c())
-        written.append(path)
-    for name, reason in image.unlowered:
-        # Not swallowed: a body that would not lower became a stub that traps
-        # if it is ever called, and every one of them is named here.
-        print(f"wyrm: {filename}: {name}() will not compile, so calling it "
-              f"traps: {reason}", file=sys.stderr)
-    for path in written:
-        print(f"wyrm: wrote {path}")
-    return 0
-
-
-def run_compiled_script(tree, filename: str, script_args: list) -> int:
-    """--vm: compile a source script to a module image and run it on the
-    bytecode VM, caching the image in `__wycache__/` the way a plain run
-    caches the parsed tree - `foo.wy` -> `__wycache__/foo.wyc`.
-
-    This is the compile step only; a run that found a fresh image already
-    sitting in the cache never gets here (see main, which hands that
-    straight to run_image_file). If the cache can't be written, the run
-    still happens - the image is right here in memory - it just isn't
-    saved for next time.
-    """
-    from wypoc import vm
-    from wypoc.compiler_bc import CompileError, compile_module
-
-    module_name = os.path.splitext(os.path.basename(filename))[0]
-    try:
-        image = compile_module(tree, module_name, filename)
-    except CompileError as e:
-        print(f"wyrm: {filename}: {e}", file=sys.stderr)
-        return 1
-    for name, reason in image.unlowered:
-        # Same fail-loud courtesy --build-bc extends: a body that would not
-        # lower is a stub that traps if it is ever called, and it is named.
-        print(f"wyrm: {filename}: {name}() will not compile, so calling it "
-              f"traps: {reason}", file=sys.stderr)
-    blob = image.to_wyc()
-    cache_mod.save_image(filename, blob)
-    return run_image(vm.load(blob), filename, script_args)
-
-
-def run_image(image, path: str, script_args: list) -> int:
-    """Run an already-loaded image, turning what the VM raises into the
-    exit codes and one-line messages a script run answers with."""
-    from wypoc import vm
-
-    wyrm_modules.set_script_root(os.path.dirname(os.path.abspath(path)))
-    try:
-        vm.load_module(image, path=path, argv=script_args)
-    except vm.VMError as e:
-        print(f"wyrm: {e}", file=sys.stderr)
-        return 1
-    except ExitSignal as e:
-        return e.code
-    except EndSignal:
-        return 0
-    except Exception as e:
-        print(f"wyrm: {_format_runtime_error(e, path)}", file=sys.stderr)
-        return 1
-    return 0
-
-
 def run_repl(tui: bool, options: "dict | None" = None,
              project_root: "str | None" = None,
              preamble: "str | None" = None) -> int:
@@ -425,29 +292,6 @@ def run_repl(tui: bool, options: "dict | None" = None,
     return run_readline(session)
 
 
-def run_image_file(path: str, script_args: list) -> int:
-    """`wyrm module.wyc`: run a compiled module image.
-
-    The mirror of running a `.wys` file - both are compiled units rather than
-    source - except that a `.wyc` is executed by the bytecode VM instead of
-    being decoded back into a tree for the interpreter. The module's own
-    directory is a search root, the same courtesy a `.wy` script gets, so an
-    image can import a module sitting next to it.
-    """
-    from wypoc import vm
-
-    try:
-        with open(path, "rb") as f:
-            image = vm.load(f.read())
-    except OSError as e:
-        print(f"wyrm: can't open file {path!r}: {e.strerror}", file=sys.stderr)
-        return 2
-    except vm.VMError as e:
-        print(f"wyrm: {e}", file=sys.stderr)
-        return 1
-    return run_image(image, path, script_args)
-
-
 def main(argv: list = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -460,10 +304,6 @@ def main(argv: list = None) -> int:
     config_mode = False
     config_assignments = []
     check_mode = False
-    build_bc_mode = False
-    vm_mode = False
-    emit_containers = None
-    strip_debug = False
     no_config = False
     include_paths = []
     output_path = None
@@ -480,18 +320,6 @@ def main(argv: list = None) -> int:
             dump_wys_mode = True
         elif opt == "--check":
             check_mode = True
-        elif opt == "--build-bc":
-            build_bc_mode = True
-        elif opt == "--vm":
-            vm_mode = True
-        elif opt == "--strip":
-            strip_debug = True
-        elif opt == "--emit":
-            if i + 1 >= len(argv):
-                print("wyrm: --emit requires a container list", file=sys.stderr)
-                return 2
-            emit_containers = argv[i + 1]
-            i += 1
         elif opt == "--no-config":
             no_config = True
         elif opt.startswith("-I"):
@@ -577,20 +405,6 @@ def main(argv: list = None) -> int:
         print("wyrm: --check cannot be used with --dump-wys or -c", file=sys.stderr)
         return 2
 
-    if build_bc_mode and (dump_wys_mode or check_mode or code is not None):
-        print("wyrm: --build-bc cannot be used with --dump-wys, --check, or -c",
-              file=sys.stderr)
-        return 2
-
-    if vm_mode and (dump_wys_mode or check_mode or build_bc_mode or code is not None):
-        print("wyrm: --vm cannot be used with --dump-wys, --check, --build-bc, or -c",
-              file=sys.stderr)
-        return 2
-
-    if (emit_containers is not None or strip_debug) and not build_bc_mode:
-        print("wyrm: --emit and --strip only apply to --build-bc", file=sys.stderr)
-        return 2
-
     if module_arg is not None and (dump_wys_mode or check_mode or code is not None):
         print("wyrm: -m cannot be used with --dump-wys, --check, or -c", file=sys.stderr)
         return 2
@@ -609,7 +423,7 @@ def main(argv: list = None) -> int:
     # No script and no -c: this is an interactive session, not a usage
     # error - `wyrm` alone means the REPL, like `python` alone does.
     if (code is None and module_arg is None and not dump_wys_mode
-            and not check_mode and not build_bc_mode and i >= len(argv)):
+            and not check_mode and i >= len(argv)):
         # The config file supplies the session's starting options - global,
         # then a project's own if one is found (see project.py) - and the
         # `tui` one among them stands in for --tui when neither -t nor
@@ -648,12 +462,6 @@ def main(argv: list = None) -> int:
             script_path = argv[i]
             script_args = argv[i + 1:]
 
-        if script_path.endswith(".wyc"):
-            # A `.wyc` is a compiled module image, not source: it is loaded
-            # and run by the bytecode VM (wypoc/vm/), not parsed. Handled
-            # before the read below, which opens the file as text.
-            return run_image_file(script_path, script_args)
-
         try:
             with open(script_path) as f:
                 src = f.read()
@@ -661,15 +469,6 @@ def main(argv: list = None) -> int:
             print(f"wyrm: can't open file {script_path!r}: {e.strerror}", file=sys.stderr)
             return 2
         filename = script_path
-
-        if vm_mode:
-            # A cached image that is newer than its source is the whole
-            # point of --vm: it skips the parse *and* the compile below,
-            # exactly the way a fresh `__pycache__/foo.pyc` skips both for
-            # Python. A miss falls through and compiles at the bottom.
-            fresh_image = cache_mod.fresh_image_for(filename)
-            if fresh_image is not None:
-                return run_image_file(fresh_image, script_args)
 
         # Every mode that runs, compiles, or checks an actual script file -
         # not just the REPL and -c, which already did this - honors
@@ -729,19 +528,6 @@ def main(argv: list = None) -> int:
         else:
             sys.stdout.write(wys_src)
         return 0
-
-    if build_bc_mode:
-        return build_bytecode(tree, filename, output_path, emit_containers,
-                              debug=not strip_debug)
-
-    if vm_mode:
-        if dbus_session:
-            try:
-                wyrm_dbus.connect_session()
-            except wyrm_dbus.DbusError as e:
-                print(f"wyrm: --dbus-session: {e}", file=sys.stderr)
-                return 1
-        return run_compiled_script(tree, filename, script_args)
 
     if check_mode:
         # A basic sanity check, not a real run: parse the script, then

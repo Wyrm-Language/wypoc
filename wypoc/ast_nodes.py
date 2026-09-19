@@ -79,8 +79,7 @@ class Node:
     """Base class: gives every dataclass node a recursive, readable __str__."""
 
     # Every concrete node subclass gets a small, dense int tag, assigned in
-    # class-definition order - a "bytecode value" for the node's own kind.
-    # The evaluator dispatches on `node.TAG` (an O(1) array index) instead
+    # class-definition order. The evaluator dispatches on `node.TAG` (an O(1) array index) instead
     # of an `isinstance` chain - see wyrm_eval_parse_tree.py's
     # _EXPR_SIMPLE_DISPATCH/_EXPR_GEN_DISPATCH. Auto-assigned rather than
     # hand-numbered so adding/removing/reordering node classes here can
@@ -375,8 +374,8 @@ class Import(Node):
     not become a runtime dependency of the importing module. The language
     spec pairs that with usage restrictions on what a static import may be
     used for: no closures, no class construction, no runtime message
-    invocation. Neither wypoc engine enforces those yet (see
-    wyrm_eval_parse_tree._adopt_messages and compiler_bc/module.py).
+    invocation. This interpreter does not enforce those yet (see
+    wyrm_eval_parse_tree._adopt_messages).
 
     `path_pos` has one span per `path` segment, so a jump from `io` in
     `import std::io` can target that segment alone rather than the whole

@@ -152,9 +152,7 @@ def _format(value, repr_mode: bool, ctx: dict | None = None) -> str:
         tail = "" if node is NIL or node is None else f" . {_format(node, True, ctx)}"
         return f"$[{', '.join(parts)}{tail}]"
     if isinstance(value, bytearray):
-        # Length-only summary, matching compiler_bc/image.py's
-        # `_static_repr` for a binary static-pool constant - one format
-        # for "a bytes value" rather than two.
+        # Length-only summary ("3 bytes").
         return f"{len(value)} bytes"
     if isinstance(value, list):
         return "[" + ", ".join(_format(v, True, ctx) for v in value) + "]"
@@ -481,10 +479,7 @@ class Pair:
         # The write half of `__getitem__`: `pair_list[i] = v` replaces that
         # cell's car in place, the same mutation `$set_car` performs one cell
         # at a time. Without it a pair list would be the one indexable value
-        # that can be read but not written - and the bytecode compiler builds
-        # a mutated closure variable's capture cell out of exactly this
-        # (a one-element `$[...]` plus getidx/setidx, see
-        # doc/llm-bytecode.md's capture cells), so both halves have to exist.
+        # that can be read but not written.
         self._node_at(index).car = value
 
     def _node_at(self, index) -> "Pair":
