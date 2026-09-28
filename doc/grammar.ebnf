@@ -57,12 +57,14 @@ symbol_literal  ::= "'" , ( identifier | operator_symbol ) ;
                      "'" followed by a name. *)
 
 (* An operator, written as a symbol. The s-expression format spells a
-   binop's operator as one, so a tree cannot be built from scratch without
-   these; nothing else in the grammar puts an operator after a quote, so
-   there is no ambiguity to trade for it. *)
+   binop's operator, and a qualified name's head (:: a b c), as one, so a
+   tree cannot be built from scratch without these; nothing else in the
+   grammar puts an operator after a quote, so there is no ambiguity to
+   trade for it. *)
 operator_symbol ::= "+" | "-" | "*" | "/" | "%" | "**"
                    | "&" | "|" | "^" | "~" | "<<" | ">>"
-                   | "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" ;
+                   | "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>"
+                   | "::" ;
 
 ellipsis_literal
                 ::= "..." ;                (* the placeholder / template hole *)

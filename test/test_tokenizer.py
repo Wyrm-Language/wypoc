@@ -99,7 +99,7 @@ def test_shift_and_complement_operators_are_lexed(src, ops):
     assert [t for kind, t in _significant(src) if kind == token.OP] == ops
 
 
-@pytest.mark.parametrize("text", ["'<<", "'>>", "'~", "'$ast"])
+@pytest.mark.parametrize("text", ["'<<", "'>>", "'~", "'$ast", "'::"])
 def test_the_new_operators_and_dollar_names_can_be_symbols(text):
     toks = _string_tokens(text + "\n")
     assert len(toks) == 1 and toks[0].string == text

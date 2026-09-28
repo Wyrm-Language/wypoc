@@ -44,12 +44,14 @@ MULTI_OPS = sorted(
 
 SINGLE_OPS = set("()[]{}.,:+-*/%&|^~<>=!$'@")
 
-# The operators a symbol literal may name - `'+`, `'<=>`, ... The canonical
-# s-expression format spells a binop's operator as a symbol, so building a
-# tree from scratch is impossible without these (see doc/sexpr-spec.md's
-# "Operators"). Longest first, same maximal-munch rule MULTI_OPS uses.
+# The operators a symbol literal may name - `'+`, `'<=>`, `'::`, ... The
+# canonical s-expression format spells a binop's operator, and a qualified
+# name's `(:: a b c)`, as a symbol, so building a tree from scratch is
+# impossible without these (see doc/sexpr-spec.md's "Operators"). Longest
+# first, same maximal-munch rule MULTI_OPS uses.
 SYMBOL_OPERATORS = sorted(
-    ["<=>", "**", "==", "!=", "<=", ">=", "<<", ">>", "+", "-", "*", "/", "%",
+    ["<=>", "**", "==", "!=", "<=", ">=", "<<", ">>", "::",
+     "+", "-", "*", "/", "%",
      "&", "|", "^", "~", "<", ">"],
     key=len, reverse=True,
 )
