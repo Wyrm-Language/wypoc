@@ -52,8 +52,8 @@ DOLLAR = "dollar"
 # offering: a user typing `defer on ...` wants `error` suggested.
 SOFT_KEYWORDS = ("as", "except", "on", "error")
 
-# `$ast` is the only member of the `$`-family that is built; the others are
-# reserved (see ast_nodes.AstRef) and deliberately not offered. The `$` is
+# `$ast` is the one `$` member with a meaning of its own (a definition's
+# tree, design syntax.md G7). The `$` is
 # part of the name now that it's an ordinary identifier character (see
 # wyrm_tokenizer._is_ident_cont), so it's part of the label an editor
 # inserts too.

@@ -144,7 +144,7 @@ def test_a_wyrm_error_value_is_reported_as_an_error():
 
 def test_imports_persist_across_entries():
     session = Session()
-    assert not session.evaluate("from std::io import println").failed
+    assert not session.evaluate("import std::io::(println)").failed
     assert session.evaluate('println("x")').output == "x\n"
 
 
@@ -163,9 +163,11 @@ def test_results_are_pretty_printed_by_default():
 def test_set_compact_returns_to_one_line_results():
     session = Session()
     assert run_command(session, ":set compact") == ("message", "compact on")
-    assert session.evaluate("$[1, 2, 3]").display == "$[1, 2, 3]"
+    long = "$[" + ", ".join(["1000000000"] * 10) + "]"
+    one_line = "(" + " ".join(["1000000000"] * 10) + ")"
+    assert session.evaluate(long).display == one_line
     assert run_command(session, ":unset compact") == ("message", "compact off")
-    assert session.evaluate("$[1, 2, 3]").display == "(1 2 3)"
+    assert session.evaluate(long).display == one_line.replace(" ", "\n ")
 
 
 def test_compact_is_off_to_begin_with():

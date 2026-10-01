@@ -1,87 +1,122 @@
-"""Exercises the canonical s-expression bridge (wypoc/sexpr.py) directly:
-the shape each kind encodes to, that every kind round-trips, and that a
-construct or an s-expression the format doesn't carry fails by name rather
-than producing a half-translated tree."""
+"""Exercises the canonical tree bridge (wypoc/sexpr.py) directly: the shape
+each kind encodes to, that every kind round-trips, and that a construct or a
+tree the format doesn't carry fails by name rather than producing a
+half-translated tree. Shapes are written in the D2 printed form (see
+wypoc/sexp_print.py), as the conformance corpus writes them."""
+from pathlib import Path
+
 import pytest
 
+from conftest import SAMPLES_DIR
 from wypoc import ast_nodes as ast
 from wypoc import sexpr
 from wypoc.parse import parse
-from wypoc.wyrm_builtins import NIL, Pair, Symbol, _to_str
+from wypoc.sexp_print import write
+from wypoc.wyrm_builtins import NIL, Pair, Symbol
 
 
 def encode_first(src: str):
-    """The s-expression of `src`'s first statement."""
+    """The tree of `src`'s first statement."""
     return sexpr.encode(parse(src).body[0])
 
 
 def encoded(src: str) -> str:
-    return _to_str(encode_first(src))
+    return write(encode_first(src))
 
 
-# One row per kind in the format, so the table below is also the reference
-# for what a decorator sees. Statement kinds are given as whole statements;
-# expression kinds ride in on a `:=` whose `'define` wrapper is part of the
-# expected text.
+def round_trip(tree):
+    """encode -> decode -> encode, printed."""
+    return write(sexpr.encode(sexpr.decode(tree)))
+
+
+# One row per kind, so the table is also the reference for what a decorator
+# sees. Expression kinds ride in on a `:=`, whose `define` wrapper is part
+# of the expected text.
 SHAPES = [
-    ("x := 41", "$['define, 'x, $['type, 'auto], $['int, 41]]"),
-    ("x := 2.5", "$['define, 'x, $['type, 'auto], $['float, 2.5]]"),
-    ('x := "hi"', '$[\'define, \'x, $[\'type, \'auto], $[\'str, "hi"]]'),
-    ("x := true", "$['define, 'x, $['type, 'auto], $['true]]"),
-    ("x := false", "$['define, 'x, $['type, 'auto], $['false]]"),
-    ("x := nil", "$['define, 'x, $['type, 'auto], $['nil]]"),
-    ("x := ...", "$['define, 'x, $['type, 'auto], $['ellipsis]]"),
-    ("x := 'name", "$['define, 'x, $['type, 'auto], $['sym, 'name]]"),
-    ("x := y", "$['define, 'x, $['type, 'auto], $['name, 'y]]"),
-    ("x := this", "$['define, 'x, $['type, 'auto], $['name, 'this]]"),
-    ("x := [1, 2]", "$['define, 'x, $['type, 'auto], $['list, [$['int, 1], $['int, 2]]]]"),
-    ("x := (1, 2)", "$['define, 'x, $['type, 'auto], $['tuple, [$['int, 1], $['int, 2]]]]"),
-    ("x := $[1, 2]", "$['define, 'x, $['type, 'auto], $['pairlist, [$['int, 1], $['int, 2]]]]"),
-    ('x := {"a": 1}', '$[\'define, \'x, $[\'type, \'auto], $[\'dict, [$[\'pair, $[\'str, "a"], $[\'int, 1]]]]]'),
-    ("x := a + b", "$['define, 'x, $['type, 'auto], $['binop, '+, $['name, 'a], $['name, 'b]]]"),
-    ("x := a <=> b", "$['define, 'x, $['type, 'auto], $['binop, '<=>, $['name, 'a], $['name, 'b]]]"),
-    ("x := a << b", "$['define, 'x, $['type, 'auto], $['binop, '<<, $['name, 'a], $['name, 'b]]]"),
-    ("x := a >> b", "$['define, 'x, $['type, 'auto], $['binop, '>>, $['name, 'a], $['name, 'b]]]"),
-    ("x := -a", "$['define, 'x, $['type, 'auto], $['unop, '-, $['name, 'a]]]"),
-    ("x := +a", "$['define, 'x, $['type, 'auto], $['unop, '+, $['name, 'a]]]"),
-    ("x := ~a", "$['define, 'x, $['type, 'auto], $['unop, '~, $['name, 'a]]]"),
-    ("x := a and b", "$['define, 'x, $['type, 'auto], $['and, $['name, 'a], $['name, 'b]]]"),
-    ("x := a or b", "$['define, 'x, $['type, 'auto], $['or, $['name, 'a], $['name, 'b]]]"),
-    ("x := not a", "$['define, 'x, $['type, 'auto], $['not, $['name, 'a]]]"),
-    ("x := f(1)", "$['define, 'x, $['type, 'auto], $['call, $['name, 'f], [$['int, 1]]]]"),
-    ("x := a.b", "$['define, 'x, $['type, 'auto], $['attr, $['name, 'a], 'b]]"),
-    ("x := a[0]", "$['define, 'x, $['type, 'auto], $['index, $['name, 'a], $['int, 0]]]"),
-    ("x := o ! m(1)", "$['define, 'x, $['type, 'auto], $['msg, $['name, 'o], 'm, [$['int, 1]]]]"),
-    ("x := m::C", "$['define, 'x, $['type, 'auto], $['mod_get, $['name, 'm], 'C]]"),
-    ("x := v is int", "$['define, 'x, $['type, 'auto], $['is, $['name, 'v], [$['type, 'int]]]]"),
-    ("x := v is not int",
-     "$['define, 'x, $['type, 'auto], $['not, $['is, $['name, 'v], [$['type, 'int]]]]]"),
-    ("x := try v", "$['define, 'x, $['type, 'auto], $['try, $['name, 'v]]]"),
-    ("x := v catch 0", "$['define, 'x, $['type, 'auto], $['catch, $['name, 'v], $['int, 0]]]"),
-    ("x := v catch return 0",
-     "$['define, 'x, $['type, 'auto], $['catch_return, $['name, 'v], $['int, 0]]]"),
-    ("f(x)", "$['expr_stmt, $['call, $['name, 'f], [$['name, 'x]]]]"),
-    ("x = 1", "$['set, 'x, $['int, 1]]"),
-    ("x ?= 1", "$['if_set, 'x, $['int, 1]]"),
-    ("a.b = 1", "$['set, $['attr, $['name, 'a], 'b], $['int, 1]]"),
-    ("a[0] = 1", "$['set, $['index, $['name, 'a], $['int, 0]], $['int, 1]]"),
-    ("break", "$['break, nil]"),
-    ("continue", "$['continue]"),
-    ("pass", "$['pass]"),
-    ("return x", "$['return, $['name, 'x]]"),
-    ("with x = 1", "$['with, [$['decl, 'x, $['int, 1]]]]"),
-    ("import a::b",
-     "$['import, [$['name, 'a], $['name, 'b]], $['false], nil, nil, $['false], nil]"),
-    ("import a::b as c",
-     "$['import, [$['name, 'a], $['name, 'b]], $['false], $['name, 'c], nil, "
-     "$['false], nil]"),
-    ("import a::(x, y as z)",
-     "$['import, [$['name, 'a]], $['false], nil, "
-     "[$['import_item, 'x, nil], $['import_item, 'y, $['name, 'z]]], $['false], nil]"),
-    ("import a::* except b",
-     "$['import, [$['name, 'a]], $['false], nil, nil, $['true], [$['name, 'b]]]"),
-    ("import static a::b",
-     "$['import, [$['name, 'a], $['name, 'b]], $['true], nil, nil, $['false], nil]"),
+    ("x := 41", "(define x (type auto) (int 41))"),
+    ("x := 2.5", "(define x (type auto) (float 2.5))"),
+    ('x := "hi"', '(define x (type auto) (str "hi"))'),
+    ("x := true", "(define x (type auto) (true))"),
+    ("x := false", "(define x (type auto) (false))"),
+    ("x := nil", "(define x (type auto) (nil))"),
+    ("x := ...", "(define x (type auto) (ellipsis))"),
+    ("x := 'name", "(define x (type auto) (sym name))"),
+    ("x := \\a", "(define x (type auto) (char 97))"),
+    ("x := \\newline", "(define x (type auto) (char 10))"),
+    ("x := y", "(define x (type auto) y)"),
+    ("x := this", "(define x (type auto) this)"),
+    ("x := [1, 2]", "(define x (type auto) (array (int 1) (int 2)))"),
+    ("x := (1, 2)", "(define x (type auto) (tuple (int 1) (int 2)))"),
+    ("x := $[1, 2]", "(define x (type auto) (list (int 1) (int 2)))"),
+    ('x := {"a": 1}', '(define x (type auto) (dict ((str "a") (int 1))))'),
+    ("x := a + b", "(define x (type auto) (+ a b))"),
+    ("x := a <=> b", "(define x (type auto) (<=> a b))"),
+    ("x := a << b", "(define x (type auto) (<< a b))"),
+    ("x := a in b", "(define x (type auto) (in a b))"),
+    ("x := a not in b", "(define x (type auto) (not (in a b)))"),
+    ("x := -a", "(define x (type auto) (neg a))"),
+    ("x := +a", "(define x (type auto) (pos a))"),
+    ("x := ~a", "(define x (type auto) (~ a))"),
+    ("x := a and b and c", "(define x (type auto) (and a b c))"),
+    ("x := a or b", "(define x (type auto) (or a b))"),
+    ("x := not a", "(define x (type auto) (not a))"),
+    ("x := f(1)", "(define x (type auto) (apply f (int 1)))"),
+    ("x := f(a, *b, k=1, **c)",
+     "(define x (type auto) (apply f a (spread b) (kwarg k (int 1)) (spread_kw c)))"),
+    ("x := a.b", "(define x (type auto) (attr a b))"),
+    ("x := a[0]", "(define x (type auto) (index a (int 0)))"),
+    ("x := o ! m(1)", "(define x (type auto) (apply (bind_msg o m) (int 1)))"),
+    ("x := o ! m", "(define x (type auto) (bind_msg o m))"),
+    ("x := o ! mod::m()", "(define x (type auto) (apply (bind_msg o (:: mod m))))"),
+    ("x := (a, b) ! m()", "(define x (type auto) (apply (bind_msg (tuple a b) m)))"),
+    ("x := m::C", "(define x (type auto) (:: m C))"),
+    ("x := f::$ast", "(define x (type auto) (:: f $ast))"),
+    ("x := super(1)", "(define x (type auto) (apply super (int 1)))"),
+    ("x := v is int", "(define x (type auto) (is v (type int)))"),
+    ("x := v is int | nil", "(define x (type auto) (is v (type int nil)))"),
+    ("x := v is not int", "(define x (type auto) (not (is v (type int))))"),
+    ("x := try v", "(define x (type auto) (try v))"),
+    ("x := try v catch 0", "(define x (type auto) (try (catch v (int 0))))"),
+    ("x := v catch 0", "(define x (type auto) (catch v (int 0)))"),
+    ("x := v catch return 0", "(define x (type auto) (catch v (return (int 0))))"),
+    ("x := fn(a): a", "(define x (type auto) (lambda ((a (type auto) ())) (type auto) a))"),
+    ("x := co(<- int, a): yield a",
+     "(define x (type auto) (co_lambda ((a (type auto) ())) (type int) (type auto) (yield a)))"),
+    ("x := class(B) { slot a; }",
+     "(define x (type auto) (class_expr B (slot_def a (type auto) () ())))"),
+    ("x := @d(1) 3", "(define x (type auto) (decorate d (int 3) (int 1)))"),
+    ("x := y ?= 1", "(define x (type auto) (if_set y (int 1)))"),
+    ("f(x)", "(apply f x)"),
+    ("x = 1", "(set x (int 1))"),
+    ("x = 1, 2", "(set x (tuple (int 1) (int 2)))"),
+    ("x ?= 1", "(if_set x (int 1))"),
+    ("a.b = 1", "(set (attr a b) (int 1))"),
+    ("a[0] = 1", "(set (index a (int 0)) (int 1))"),
+    ("this.a = 1", "(set (attr this a) (int 1))"),
+    ("a, b = b, a", "(set_values (a b) (tuple b a))"),
+    ("a, b = f()", "(set_values (a b) (apply f))"),
+    ("var a: int, b = 1, 2", "(define_values ((a (type int)) (b (type auto))) (tuple (int 1) (int 2)))"),
+    ("a, b := f()", "(define_values ((a (type auto)) (b (type auto))) (apply f))"),
+    ("var z", "(define z (type auto) ())"),
+    ("var z: a::T | nil", "(define z (type (:: a T) nil) ())"),
+    ("static s: int = 0", "(static s (type int) (int 0))"),
+    ("break", "(break)"),
+    ("break 1", "(break (int 1))"),
+    ("continue", "(continue)"),
+    ("pass", "(pass)"),
+    ("return", "(return)"),
+    ("return x", "(return x)"),
+    ("yield", "(yield)"),
+    ("yield x", "(yield x)"),
+    ("yield from g()", "(yield_from (apply g))"),
+    ("slot count: int = 0", "(slot_def count (type int) (int 0) ())"),
+    ("import a", "(import a)"),
+    ("import a::b", "(import (:: a b))"),
+    ("import a::b as c", "(import (:: a b) (as c))"),
+    ("import a::(x, y as z)", "(import a (items (item x ()) (item y z)))"),
+    ("import a::*", "(import a (all))"),
+    ("import a::* except (b, c)", "(import a (all b c))"),
+    ("import static a::b", "(import_static (:: a b))"),
 ]
 
 
@@ -93,21 +128,34 @@ def test_kind_encodes_to_its_documented_shape(src, expected):
 @pytest.mark.parametrize("src", [s for s, _ in SHAPES], ids=[s for s, _ in SHAPES])
 def test_every_kind_round_trips(src):
     once = encode_first(src)
-    twice = sexpr.encode(sexpr.decode(once))
-    assert _to_str(once) == _to_str(twice)
+    assert round_trip(once) == write(once)
 
 
 MULTILINE = [
-    ("do", "x := do:\n    1\n", "$['define, 'x, $['type, 'auto], $['do, [$['expr_stmt, $['int, 1]]]]]"),
-    ("static", "static s = 0\n", "$['static, 's, $['int, 0]]"),
-    ("while", "while c:\n    pass\n", "$['while, $['name, 'c], [$['pass]]]"),
-    ("for", "for i in xs:\n    pass\n",
-     "$['for, 'i, $['name, 'xs], [$['pass]]]"),
-    ("if", "if c:\n    pass\n", "$['if, $['name, 'c], [$['pass]], []]"),
-    ("defer", "defer:\n    pass\n", "$['defer, [$['pass]]]"),
-    ("defer_on", "defer on error:\n    pass\n",
-     "$['defer_on, [$['pass]], [$['type, 'error]]]"),
-    ("with block", "with:\n    x = 1\n", "$['with, [$['decl, 'x, $['int, 1]]]]"),
+    ("do", "x := do:\n    1\n", "(define x (type auto) (do (int 1)))"),
+    ("while", "while c:\n    f()\n    g()\n", "(while c (do (apply f) (apply g)))"),
+    ("while one", "while c { f() }\n", "(while c (apply f))"),
+    ("for", "for i in xs:\n    pass\n", "(for i xs () (pass))"),
+    ("for else", "for i in xs: f(i)\nelse: g()\n", "(for i xs (apply g) (apply f i))"),
+    ("if", "if c:\n    pass\n", "(cond (c (pass)))"),
+    ("if chain", "if a: 1\nelif b: 2\nelse: 3\n",
+     "(cond (a (int 1)) (b (int 2)) (else (int 3)))"),
+    ("defer", "defer:\n    pass\n", "(defer (pass))"),
+    ("defer_on", "defer on error:\n    pass\n", "(defer_on (type error) (pass))"),
+    ("fn", "fn [A, B] m(a: int, b = 2, *r, **k) -> str:\n    log(a)\n    a\n",
+     "(fn_def m (dispatch (type A) (type B)) ((a (type int) ()) (b (type auto) (int 2)) "
+     "(* r (type auto)) (** k (type auto))) (type str) (do (apply log a) a))"),
+    ("fn empty dispatch", "fn [] m(): 1\n", "(fn_def m (dispatch) () (type auto) (int 1))"),
+    ("co", "co g(<- int, n) -> int: yield n\n",
+     "(co_def g () ((n (type auto) ())) (type int) (type int) (yield n))"),
+    ("class", "class A(B):\n    slot n: int = 0\n    fn [A] get(): this.n\n",
+     "(class_def A B (do (slot_def n (type int) (int 0) ()) "
+     "(fn_def get (dispatch (type A)) () (type auto) (attr this n))))"),
+    ("class empty", "class A {}\n", "(class_def A () (pass))"),
+    ("virtual slot", "class A:\n    slot age: int:\n        fn getter(): 1\n",
+     "(class_def A () (slot_def age (type int) () (fn_def getter () () (type auto) (int 1))))"),
+    ("decorated", "@a(1)\n@b\nfn g(): 1\n",
+     "(decorate a (decorate b (fn_def g () () (type auto) (int 1))) (int 1))"),
 ]
 
 
@@ -115,184 +163,107 @@ MULTILINE = [
 def test_multiline_kinds(name, src, expected):
     assert encoded(src) == expected
     once = encode_first(src)
-    assert _to_str(sexpr.encode(sexpr.decode(once))) == _to_str(once)
+    assert round_trip(once) == write(once)
 
 
-def test_elif_is_a_nested_if_in_the_else_position():
-    """`elif` has no kind of its own: the format's three-field `'if` carries
-    a chain as the nested `if` it means."""
-    src = "if a:\n    pass\nelif b:\n    pass\nelse:\n    return 1\n"
-    assert encoded(src) == (
-        "$['if, $['name, 'a], [$['pass]], "
-        "[$['if, $['name, 'b], [$['pass]], [$['return, $['int, 1]]]]]]"
-    )
-
-
-def test_fn_signature_shape():
-    src = "fn add(a: int, b: str) -> int:\n    return a + b\n"
-    assert encoded(src) == (
-        "$['fn, 'add, [$['type, 'int]], nil, nil, "
-        "[$['param, 'a, $['type, 'int]], "
-        "$['param, 'b, $['type, 'str]]], [], "
-        "[$['return, $['binop, '+, $['name, 'a], $['name, 'b]]]]]"
-    )
-
-
-def test_rest_parameter_has_its_own_position():
-    """Not a flag on a parameter: it leaves the parameter chain on the way
-    out and rejoins it, last, on the way back."""
-    tree = parse("fn f(a, *others):\n    pass\n").body[0]
-    encoded_fn = sexpr.encode(tree)
-    fields = sexpr._as_list(encoded_fn, "fn")
-    rest, params = fields[3], fields[5]
-    assert _to_str(rest) == "$['param, 'others, nil]"
-    assert len(params) == 1, "the rest parameter is not among the declared ones"
-    back = sexpr.decode(encoded_fn)
-    assert [type(p).__name__ for p in back.params] == ["Param", "VarPositional"]
-
-
-def test_dispatch_types_are_name_nodes():
-    src = "fn [Box] describe():\n    pass\n"
-    assert "[$['name, 'Box]]" in encoded(src)
-    assert sexpr.decode(encode_first(src)).class_target == ["Box"]
-
-
-def test_qualified_type_splits_into_a_qualified_name():
-    tree = ast.TypeExpr(["std", "io", "File"])
-    assert _to_str(sexpr.encode(tree)) == "$['type, $['qualified_name, 'std, 'io, 'File]]"
-    assert sexpr.decode_type(sexpr.encode(tree)).parts == ["std", "io", "File"]
-
-
-def test_unannotated_var_target_is_type_auto():
-    """`x := 1` (no annotation) encodes its target's type as `$['type,
-    'auto]`, matching the reference parser's `_mk_type_expression` default -
-    see `sexpr._encode_var_type`."""
-    assert encoded("x := 1") == "$['define, 'x, $['type, 'auto], $['int, 1]]"
-    assert sexpr.decode(encode_first("x := 1")).targets[0].type is None
-
-
-def test_var_with_explicit_type():
-    assert encoded("var count: int = 0") == (
-        "$['define, 'count, $['type, 'int], $['int, 0]]"
-    )
-
-
-def test_multi_target_var_is_define_values():
-    """`var a: int, b: float = 4, 4.2` - one `'define_values` carrying a
-    `[name, type]` pair per target and the whole init tuple, matching the
-    reference parser's `_build_define` (wy/wyrm/parser/parser.wy)."""
-    src = "var a: int, b: float = 4, 4.2"
-    assert encoded(src) == (
-        "$['define_values, [['a, $['type, 'int]], ['b, $['type, 'float]]], "
-        "$['tuple, [$['int, 4], $['float, 4.2]]]]"
-    )
-    back = sexpr.decode(encode_first(src))
-    assert [(t.name, t.type.parts) for t in back.targets] == [
-        ("a", ["int"]), ("b", ["float"]),
-    ]
-    assert [v.value for v in back.values] == ["4", "4.2"]
-
-
-def test_every_kind_round_trips_multi_target_var():
-    once = encode_first("var a: int, b: float = 4, 4.2")
-    twice = sexpr.encode(sexpr.decode(once))
-    assert _to_str(once) == _to_str(twice)
-
-
-def test_multi_target_assign_is_set_values():
-    """`a, b = b, a` - one `'set_values` carrying a bare-symbol target list
-    and the whole value tuple, matching the reference parser's `$_mk_assign`
-    and `n_set_values` (wy/wyrm/ast.wy)."""
-    src = "a, b = b, a"
-    assert encoded(src) == (
-        "$['set_values, ['a, 'b], $['tuple, [$['name, 'b], $['name, 'a]]]]"
-    )
-    back = sexpr.decode(encode_first(src))
-    assert [t.name for t in back.targets] == ["a", "b"]
-    assert [v.id for v in back.values] == ["b", "a"]
-
-
-def test_every_kind_round_trips_multi_target_assign():
-    once = encode_first("a, b = b, a")
-    twice = sexpr.encode(sexpr.decode(once))
-    assert _to_str(once) == _to_str(twice)
-
-
-def test_qeq_rejects_more_than_one_target():
-    """`?=` only ever binds a single target - the reference parser's
-    `$_mk_assign` errors on this rather than producing an `'if_set` with
-    several, and this grammar doesn't even parse `a, b ?= ...` (`?=` isn't
-    one of `assign_op`'s multi-target forms), so this is asserted directly
-    against a hand-built tree rather than a `?=` source fixture."""
-    tree = ast.Assign([ast.NameTarget("a"), ast.NameTarget("b")], "?=",
-                      [ast.Num("1"), ast.Num("2")])
-    with pytest.raises(sexpr.SexprError, match="single assignment target"):
-        sexpr.encode(tree)
-
-
-def test_module_wraps_a_programs_statements_directly():
-    """`'module` splices its statements as direct siblings rather than a
-    single list-valued field - see `sexpr._encode_program`."""
+def test_module_splices_its_statements():
     tree = parse("x := 1\ny := 2\n")
-    assert _to_str(sexpr.encode(tree)) == (
-        "$['module, $['define, 'x, $['type, 'auto], $['int, 1]], "
-        "$['define, 'y, $['type, 'auto], $['int, 2]]]"
-    )
+    assert write(sexpr.encode(tree)) == (
+        "(module (define x (type auto) (int 1)) (define y (type auto) (int 2)))")
     back = sexpr.decode(sexpr.encode(tree))
     assert [type(s).__name__ for s in back.body] == ["VarDecl", "VarDecl"]
 
 
-def test_a_child_list_may_come_back_as_a_pair_list():
-    """The encoder always produces a list, but a decorator building one out
-    of `cons` has no reason to know which - so both are accepted."""
-    as_pairs = sexpr.node("list", sexpr._pairs([sexpr.node("int", 1)]))
-    assert sexpr.decode(as_pairs).items[0].value == "1"
+def test_an_expression_in_a_body_comes_back_as_a_statement():
+    """There is no statement wrapper on the wire (R2), so decoding a body
+    puts ExprStmt back around what isn't a statement."""
+    fn = sexpr.decode(encode_first("fn f():\n    g()\n    1\n"))
+    assert [type(s).__name__ for s in fn.body] == ["ExprStmt", "ExprStmt"]
+
+
+def test_if_set_is_a_statement_or_an_expression_by_position():
+    stmt = sexpr.decode(encode_first("x ?= 1"))
+    assert isinstance(stmt, ast.Assign) and stmt.op == "?="
+    decl = sexpr.decode(encode_first("y := x ?= 1"))
+    assert isinstance(decl.values[0], ast.SetIfUnset)
+
+
+def test_annotate_crosses_both_ways():
+    tree = sexpr.node("annotate", Symbol("template"), sexpr.node("true"),
+                      encode_first("fn f(): 1"))
+    back = sexpr.decode(tree)
+    assert isinstance(back, ast.Annotate) and back.key == "template"
+    assert isinstance(back.target, ast.FnDef)
+    assert write(sexpr.encode(back)) == (
+        "(annotate template (true) (fn_def f () () (type auto) (int 1)))")
+
+
+def test_a_form_list_may_come_back_as_a_python_list():
+    """A decorator may build a headless list (here a parameter list) out of
+    an array; a pair list is what the encoder makes, but both are
+    accepted."""
+    tree = sexpr.node("lambda", [], sexpr.node("type", Symbol("auto")), sexpr.node("int", 1))
+    assert sexpr.decode(tree).params == []
+
+
+def _samples():
+    skip = ("signal", "emit", "thread", "task ")
+    for path in sorted(Path(SAMPLES_DIR).glob("*.wy")):
+        text = path.read_text()
+        if not any(word in text for word in skip):
+            yield path
+
+
+@pytest.mark.parametrize("path", list(_samples()), ids=lambda p: p.name)
+def test_every_sample_round_trips(path):
+    """Every sample (those using wypoc's own signal/emit/task/thread aside,
+    which have no canonical tree yet) survives encode -> decode -> encode."""
+    once = sexpr.encode(parse(path.read_text()))
+    assert round_trip(once) == write(once)
 
 
 # --- failing loudly -------------------------------------------------------
 
 CANNOT_CROSS = [
-    ("co f():\n    yield 1\n", "coroutine"),
-    ("class Foo:\n    slot a: int\n", "class"),
-    ("from a::b import x\n", "from-import"),
-    ("x := a in b", "'in' operator"),
-    ("for i in xs:\n    pass\nelse:\n    pass\n", "for/else"),
-    ("fn f(**kw):\n    pass\n", "kwargs"),
+    ("class A:\n    signal s()\n", "signal"),
+    ("emit s(1)\n", "emit"),
+    ("x := task f()\n", "task"),
+    ("x := thread a::b\n", "thread"),
 ]
 
 
 @pytest.mark.parametrize("src,needle", CANNOT_CROSS, ids=[c[1] for c in CANNOT_CROSS])
 def test_a_construct_the_format_lacks_fails_by_name(src, needle):
     with pytest.raises(sexpr.SexprError) as excinfo:
-        encode_first(src)
+        sexpr.encode(parse(src))
     assert needle in str(excinfo.value)
 
 
 MALFORMED = [
     (sexpr.node("nosuchkind"), "'nosuchkind is not a node kind"),
-    (42, "a node must be a $[...] list, not a int"),
-    (sexpr.node("binop", sexpr.node("int", 1), sexpr.node("int", 1),
-                sexpr.node("int", 1)), "s-expression is missing its binop"),
-    (sexpr.node("binop", Symbol("@"), sexpr.node("int", 1),
-                sexpr.node("int", 1)), "'@ is not an operator"),
+    (42, "a node must be a symbol or a list, not a int"),
+    (sexpr.node("+", sexpr.node("int", 1)), "'+ takes 2 field(s), not 1"),
     (sexpr.node("int", "text"), "value must be a number"),
     (sexpr.node("str", Symbol("s")), "text must be a str"),
     (sexpr.node("int"), "'int takes 1 field(s), not 0"),
-    (sexpr.node("break", sexpr.node("int", 1)), "reserved field must be nil"),
-    (sexpr.node("fn", Symbol("f"), [], NIL, [sexpr.node("int", 1)], [], [], []),
-     "kwargs position is reserved"),
+    (sexpr.node("return", sexpr.node("int", 1), sexpr.node("int", 2)),
+     "'return takes at most one value"),
+    (sexpr.node("define", Symbol("x"), Symbol("int"), NIL), "a type must be"),
+    (sexpr.node("cond", sexpr.node("else", sexpr.node("pass")),
+                sexpr._pairs([Symbol("a"), sexpr.node("pass")])),
+     "else clause must be the last"),
 ]
 
 
 @pytest.mark.parametrize("bad,needle", MALFORMED, ids=[str(m[1]) for m in MALFORMED])
-def test_a_malformed_s_expression_says_what_is_wrong(bad, needle):
+def test_a_malformed_tree_says_what_is_wrong(bad, needle):
     with pytest.raises(sexpr.SexprError) as excinfo:
         sexpr.decode(bad)
     assert needle in str(excinfo.value)
 
 
 def test_string_quoting_round_trips_through_the_evaluator():
-    """A `'str` decoded and then evaluated yields the characters it came in
+    """A `str` decoded and then evaluated yields the characters it came in
     with - which needs quote_string to be the exact inverse of
     eval_string_literal."""
     from wypoc.wyrm_eval_parse_tree import eval_string_literal
@@ -305,10 +276,18 @@ def test_string_quoting_round_trips_through_the_evaluator():
 def test_number_spelling_round_trips_through_the_evaluator():
     from wypoc.wyrm_eval_parse_tree import eval_number_literal
 
-    for value in [0, 41, -7, 2.5, 2.0, 1e100, 0.1]:
+    for value in [0, 41, 2.5, 2.0, 1e100, 0.1]:
         node = sexpr.decode(sexpr.node("float" if isinstance(value, float) else "int",
                                        value))
         assert eval_number_literal(node.value) == value
+
+
+def test_char_spelling_round_trips_through_the_evaluator():
+    from wypoc.wyrm_eval_parse_tree import eval_char_literal
+
+    for codepoint in [97, 10, 32, 0, 0x263A]:
+        node = sexpr.decode(sexpr.node("char", codepoint))
+        assert eval_char_literal(node.value) == codepoint
 
 
 def test_encoding_carries_no_source_positions():
@@ -316,8 +295,3 @@ def test_encoding_carries_no_source_positions():
     produced it, so the spans are deliberately not in the format."""
     decoded = sexpr.decode(encode_first("x := 1 + 2"))
     assert all(node.pos is None for node in decoded.walk())
-
-
-def test_a_symbol_is_not_the_string_of_the_same_name():
-    assert Symbol("int") != "int"
-    assert _to_str(Pair(Symbol("int"), NIL)) == "$['int]"

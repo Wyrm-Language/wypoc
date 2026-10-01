@@ -187,6 +187,8 @@ def _render_type(type_expr) -> str:
         return ""
     if isinstance(type_expr, ast.TypeExpr):
         return "::".join(type_expr.parts)
+    if isinstance(type_expr, ast.TypeUnion):
+        return " | ".join(_render_type(t) for t in type_expr.members)
     if isinstance(type_expr, list):  # a union, e.g. `is int | float`
         return " | ".join(_render_type(t) for t in type_expr)
     return str(type_expr)
@@ -306,21 +308,8 @@ class _Builder:
                 detail=detail, container=container))
             self.reference_type(node.type)
             self.visit_expr(node.default, parent, container)
-        elif isinstance(node, (ast.WithSimple, ast.WithBinding)):
-            detail = f"with {node.name}"
-            if node.type is not None:
-                detail += f": {_render_type(node.type)}"
-            self.add(parent, Symbol(
-                node.name, CONSTANT, node.name_pos, node.pos, node,
-                detail=detail, container=container))
-            self.reference_type(node.type)
-            self.visit_expr(node.value, parent, container)
-        elif isinstance(node, ast.WithBlock):
-            self.visit_body(node.bindings, parent, container)
         elif isinstance(node, ast.Import):
             self.visit_import(node, parent, container)
-        elif isinstance(node, ast.FromImport):
-            self.visit_from_import(node, parent, container)
         elif isinstance(node, ast.For):
             # The loop variable is declared fresh per iteration (see the
             # evaluator's Scope handling), so it belongs to the loop, not
@@ -364,8 +353,8 @@ class _Builder:
         symbol = self.add(parent, Symbol(
             node.name, CLASS, node.name_pos, node.pos, node,
             detail=f"class {node.name}", container=container))
-        for base in node.bases:
-            self.visit_expr(base, parent, container)
+        if node.base is not None:
+            self.visit_expr(node.base, parent, container)
         self.visit_body(node.body, symbol, node.name)
 
     def visit_import(self, node: ast.Import, parent, container):
@@ -403,20 +392,6 @@ class _Builder:
             self.imports.append(ImportBinding(
                 name=item.name, pos=item.name_pos, module_path=segments, node=node,
                 symbol_name=item.name, local_name=item.alias or item.name))
-
-    def visit_from_import(self, node: ast.FromImport, parent, container):
-        segments = tuple(node.path)
-        spans = node.path_pos or [None] * len(segments)
-        for index, (name, span) in enumerate(zip(segments, spans)):
-            self.imports.append(ImportBinding(
-                name=name, pos=span, module_path=segments[:index + 1], node=node))
-        for name, span in zip(node.names, node.names_pos or [None] * len(node.names)):
-            self.add(parent, Symbol(
-                name, IMPORT, span, node.pos, node,
-                detail=f"from {'::'.join(node.path)} import {name}", container=container))
-            self.imports.append(ImportBinding(
-                name=name, pos=span, module_path=segments, node=node,
-                symbol_name=name, local_name=name))
 
     # -- expressions -----------------------------------------------------
     def visit_expr(self, node, parent, container):
@@ -461,8 +436,7 @@ class _Builder:
             self.visit_body(node.body, anon, container)
             return
         elif isinstance(node, (ast.FnDef, ast.CoDef, ast.ClassDef, ast.VarDecl,
-                               ast.StaticDecl, ast.For, ast.Import, ast.FromImport,
-                               ast.WithSimple, ast.WithBinding, ast.WithBlock,
+                               ast.StaticDecl, ast.For, ast.Import,
                                ast.SlotDef, ast.SignalDef)):
             # A declaration reached through a nested block (an `if` body,
             # a `do:` expression) - hand it back to the statement path so
@@ -477,8 +451,8 @@ class _Builder:
         `mod::Type`), so each segment is a reference in its own right."""
         if type_expr is None:
             return
-        if isinstance(type_expr, list):
-            for item in type_expr:
+        if isinstance(type_expr, (list, ast.TypeUnion)):
+            for item in (type_expr.members if isinstance(type_expr, ast.TypeUnion) else type_expr):
                 self.reference_type(item)
             return
         if not isinstance(type_expr, ast.TypeExpr):

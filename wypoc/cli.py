@@ -8,7 +8,7 @@ Usage:
     wyrm [interpreter options] script.wy [script args...]
     wyrm [interpreter options] -c "code" [args...]
     wyrm [interpreter options] -m mod::sub [script args...]
-    wyrm --dump-wys [-o out.wys] module.wy
+    wyrm --dump-ast module.wy
     wyrm --check script.wy
     wyrm --config name=value [--config ...]  (set an option and exit)
 
@@ -32,8 +32,7 @@ Interpreter options (must come before the script path):
                      for the full-screen one
     --check         a basic sanity check, not a run: parse `script.wy`,
                      then recursively resolve and parse every file it
-                     (transitively) imports (`import`, `from ... import`,
-                     `thread`), without evaluating any of it. Prints how
+                     (transitively) imports (`import`, `thread`), without evaluating any of it. Prints how
                      long the whole parse took on success; on failure,
                      every problem found (a syntax error, or an import that
                      doesn't resolve to a file), not just the first, and
@@ -49,14 +48,11 @@ Interpreter options (must come before the script path):
                      nothing - the command-line form of the REPL's
                      `:set config n`. Repeatable; `--config n` alone turns
                      a boolean option on, and bare `--config` lists them
-    --dump-wys      translate `module.wy` to its canonical .wys s-expression
-                     form (see wypoc/wys.py), with every decorator fully
-                     expanded, instead of running it; prints to stdout
-                     unless -o is given. A `.wys` file is a compiled unit,
-                     not source - `wyrm script.wys` runs one directly,
-                     without re-parsing or re-expanding anything.
-    -o path         with --dump-wys, write the output to `path` instead of
-                     stdout
+    --dump-ast      parse `module.wy` (or the -c code) and print its
+                     canonical tree (see wypoc/sexpr.py) on one line, in
+                     Scheme s-expression form, instead of running it.
+                     Decorators are not expanded and imports not resolved:
+                     this is the parser's output as it stands.
     --dbus-session  connect to the D-Bus session bus before running the
                      script (needs the `dbus` extra - see wypoc/wyrm_dbus.py
                      and corelib/std/dbus.wy), so `dbus::register_object`/
@@ -67,17 +63,16 @@ Interpreter options (must come before the script path):
 Everything after the script path (or, for -c, after the code string) is left
 untouched (dashes and all) and packed into a __ARGS tuple of strings,
 visible to the script - the wyrm equivalent of sys.argv[1:] for a Python
-script. --dump-wys ignores script args (a module being translated isn't run).
+script. --dump-ast ignores script args (a module being dumped isn't run).
 
-Running a `.wy` script (not `-c`, not a `.wys` file, which is already a
-compiled unit) checks an AST cache first: `<script_dir>/__wycache__/` by
+Running a `.wy` script (not `-c`) checks an AST cache first: `<script_dir>/__wycache__/` by
 default, created automatically like Python's __pycache__, or the
 `global_cache` directory from ~/.wyrm/config instead, if one is set - see
 wypoc/cache.py. A hit skips parsing entirely; a miss parses as usual and
 populates the cache for next time (silently skipped if the cache directory
 can't be created or written to).
 
-Every mode that has a script file at all - a plain run, --dump-wys,
+Every mode that has a script file at all - a plain run, --dump-ast,
 --check - honors ~/.wyrm/config the same way the
 REPL and -c already did: its options apply, and a project's own
 `.wyrm/config` overlays them (most usefully `path`, extra module search
@@ -102,11 +97,11 @@ from wypoc import project as project_mod
 from wypoc import wyrm_dbus
 from wypoc import wyrm_modules
 from wypoc import wyrm_sys
-from wypoc import wys
+from wypoc import sexp_print, sexpr
 from wypoc.parse import parse
 from wypoc.wyrm_eval_parse_tree import (
     EndSignal, ExitSignal, Scope, WyrmLocatedError, eval_program,
-    expand_decorators, expose, populate_globals,
+    expose, populate_globals,
 )
 
 
@@ -127,7 +122,7 @@ def _format_runtime_error(e: Exception, filename: "str | None") -> str:
 
 
 def write_config(assignments: list) -> int:
-    """`wyrm --config name=value ...`: a mode of its own, like --dump-wys -
+    """`wyrm --config name=value ...`: a mode of its own, like --dump-ast -
     it writes the options into ~/.wyrm/config and exits without running
     anything. Bare `--config` (no assignment at all) lists what can be set
     and what the file says now."""
@@ -178,7 +173,7 @@ def check_imports(filename: str, tree, roots: "list | None",
                    stack: "list | None" = None) -> None:
     """`--check`'s "recursively identify and check any imported files":
     walks `tree` (ast_nodes.Node.walk - every node, depth-first) for every
-    Import/FromImport/ThreadSpawn, resolves each to a file the way actually
+    Import/ThreadSpawn, resolves each to a file the way actually
     running the script would, and recursively parses and walks that file
     too. `errors` collects one message per problem found rather than
     stopping at the first, so a single `--check` run surfaces everything
@@ -202,7 +197,7 @@ def check_imports(filename: str, tree, roots: "list | None",
     symbol pulled out of the module named by the rest of the path - resolved
     here as it is there, by trying the whole path first and falling back to
     path[:-1]. `from`-imports and `thread`-spawns have no such ambiguity
-    (see ast_nodes.FromImport/ThreadSpawn) - their whole path always names a
+    (see ast_nodes.ThreadSpawn) - its whole path always names a
     module."""
     if stack is None:
         stack = [(filename, _module_spelling(filename))]
@@ -212,7 +207,7 @@ def check_imports(filename: str, tree, roots: "list | None",
             resolved = wyrm_modules.resolve_module_file(path_segments, roots)
             if resolved is None and len(path_segments) > 1:
                 resolved = wyrm_modules.resolve_module_file(path_segments[:-1], roots)
-        elif isinstance(node, (ast.FromImport, ast.ThreadSpawn)):
+        elif isinstance(node, ast.ThreadSpawn):
             path_segments = list(node.path)
             resolved = wyrm_modules.resolve_module_file(path_segments, roots)
         else:
@@ -298,7 +293,7 @@ def main(argv: list = None) -> int:
 
     verbose = False
     code = None
-    dump_wys_mode = False
+    dump_ast_mode = False
     dbus_session = False
     tui = None  # None: whatever ~/.wyrm/config says; -t/--no-tui decide it
     config_mode = False
@@ -306,7 +301,6 @@ def main(argv: list = None) -> int:
     check_mode = False
     no_config = False
     include_paths = []
-    output_path = None
     module_arg = None
     i = 0
     while i < len(argv) and argv[i].startswith("-") and argv[i] != "-":
@@ -316,8 +310,8 @@ def main(argv: list = None) -> int:
             return 0
         elif opt in ("-v", "--verbose"):
             verbose = True
-        elif opt == "--dump-wys":
-            dump_wys_mode = True
+        elif opt == "--dump-ast":
+            dump_ast_mode = True
         elif opt == "--check":
             check_mode = True
         elif opt == "--no-config":
@@ -348,12 +342,6 @@ def main(argv: list = None) -> int:
             if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                 config_assignments.append(argv[i + 1])
                 i += 1
-        elif opt == "-o":
-            if i + 1 >= len(argv):
-                print("wyrm: -o requires a path argument", file=sys.stderr)
-                return 2
-            output_path = argv[i + 1]
-            i += 1
         elif opt == "-c":
             if i + 1 >= len(argv):
                 print("wyrm: -c requires a string argument", file=sys.stderr)
@@ -397,24 +385,20 @@ def main(argv: list = None) -> int:
             return 2
         return write_config(config_assignments)
 
-    if dump_wys_mode and code is not None:
-        print("wyrm: --dump-wys cannot be used with -c", file=sys.stderr)
+    if check_mode and (dump_ast_mode or code is not None):
+        print("wyrm: --check cannot be used with --dump-ast or -c", file=sys.stderr)
         return 2
 
-    if check_mode and (dump_wys_mode or code is not None):
-        print("wyrm: --check cannot be used with --dump-wys or -c", file=sys.stderr)
+    if module_arg is not None and (dump_ast_mode or check_mode or code is not None):
+        print("wyrm: -m cannot be used with --dump-ast, --check, or -c", file=sys.stderr)
         return 2
 
-    if module_arg is not None and (dump_wys_mode or check_mode or code is not None):
-        print("wyrm: -m cannot be used with --dump-wys, --check, or -c", file=sys.stderr)
-        return 2
-
-    if dbus_session and (dump_wys_mode or check_mode):
+    if dbus_session and (dump_ast_mode or check_mode):
         print("wyrm: --dbus-session only applies to running a script, -c, or -m",
               file=sys.stderr)
         return 2
 
-    if tui and (dump_wys_mode or check_mode or code is not None or module_arg is not None
+    if tui and (dump_ast_mode or check_mode or code is not None or module_arg is not None
                 or i < len(argv)):
         print("wyrm: --tui starts the interactive REPL; it takes no script",
               file=sys.stderr)
@@ -422,7 +406,7 @@ def main(argv: list = None) -> int:
 
     # No script and no -c: this is an interactive session, not a usage
     # error - `wyrm` alone means the REPL, like `python` alone does.
-    if (code is None and module_arg is None and not dump_wys_mode
+    if (code is None and module_arg is None and not dump_ast_mode
             and not check_mode and i >= len(argv)):
         # The config file supplies the session's starting options - global,
         # then a project's own if one is found (see project.py) - and the
@@ -483,18 +467,14 @@ def main(argv: list = None) -> int:
         wyrm_modules.set_extra_search_paths(
             project_mod.resolve_search_paths(options.get("path", ""), project_root))
 
-    # A `.wys` file is already a compiled unit (see wypoc/wys.py) - loading
-    # it means decoding its s-expression back into an ast.Program, not
-    # parsing it as wyrm source. A plain `.wy` script, on the other hand,
-    # checks the AST cache first (cache.py) - a hit skips parsing entirely;
-    # a miss (including a `-c` snippet, which has no file to cache against)
-    # parses as usual and, for a real script, populates the cache for next
-    # time.
+    # A `.wy` script checks the AST cache first (cache.py) - a hit skips
+    # parsing entirely; a miss (including a `-c` snippet, which has no file
+    # to cache against) parses as usual and, for a real script, populates
+    # the cache for next time. --dump-ast always parses: it reports the
+    # parser, not a cached tree.
     check_start = time.perf_counter()  # only read by --check, below
     try:
-        if code is None and filename.endswith(".wys"):
-            tree = wys.loads(src, filename=filename)
-        elif code is None:
+        if code is None and not dump_ast_mode:
             tree = cache_mod.load(filename)
             if tree is None:
                 tree = parse(src, verbose=verbose, filename=filename)
@@ -502,10 +482,12 @@ def main(argv: list = None) -> int:
         else:
             tree = parse(src, verbose=verbose, filename=filename)
     except SyntaxError as e:
+        if dump_ast_mode:
+            # A located one-liner, `line:col: message` (1-based columns),
+            # for tools that compare parsers' errors.
+            print(f"{e.lineno}:{e.offset}: {e.msg}", file=sys.stderr)
+            return 1
         traceback.print_exception(type(e), e, None)
-        return 1
-    except wys.WysError as e:
-        print(f"wyrm: {e}", file=sys.stderr)
         return 1
 
     # A script's own directory is a search root, so a module sitting next to
@@ -513,20 +495,13 @@ def main(argv: list = None) -> int:
     if code is None:
         wyrm_modules.set_script_root(os.path.dirname(os.path.abspath(filename)))
 
-    if dump_wys_mode:
-        ctx = Scope()
-        populate_globals(ctx)
+    if dump_ast_mode:
         try:
-            expand_decorators(tree, ctx)
-            wys_src = wys.dumps(tree)
-        except Exception as e:
-            print(f"wyrm: dump-wys error: {type(e).__name__}: {e}", file=sys.stderr)
+            text = sexp_print.write(sexpr.encode(tree))
+        except sexpr.SexprError as e:
+            print(f"wyrm: --dump-ast: {e}", file=sys.stderr)
             return 1
-        if output_path:
-            with open(output_path, "w") as f:
-                f.write(wys_src)
-        else:
-            sys.stdout.write(wys_src)
+        sys.stdout.write(text + "\n")
         return 0
 
     if check_mode:

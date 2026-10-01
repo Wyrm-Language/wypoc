@@ -58,10 +58,12 @@ wypoc/
   ast_nodes.py         typed AST node dataclasses
   parse.py             glues tokenizer + generated parser together
   wyrm_eval_parse_tree.py   the tree-walking evaluator (the interpreter proper)
-  sexpr.py             the canonical s-expression wire format a syntax tree
-                        crosses in and out of wyrm code - what a decorator
-                        receives and must answer. One table (`ROWS`), read by
-                        both directions; see its module docstring
+  sexpr.py             the canonical tree a syntax tree crosses in and out of
+                        wyrm code as - what a decorator receives and must
+                        answer, and what `wyrm --dump-ast` prints. Both
+                        directions; see its module docstring
+  sexp_print.py        Scheme s-expression printing of pair lists (the one
+                        printer `--dump-ast`, `str()` and the REPL share)
   wyrm_modules.py      WYRM_PATH search-path resolution
   wyrm_io.py           POSIX-ish low-level I/O primitives exposed to wyrm
   symbols.py           static symbol table for one parsed module (no eval, no I/O)
@@ -93,9 +95,11 @@ references/rename, name resolution is span containment rather than a real scope 
 module's messages are in the importing module's message table (`import m::*`), and it
 reads and builds trees through the unqualified `sexpr(x)` builtin. `wypoc/samples/decorators.wy` (driven by `test/test_eval_decorators.py`) is the
 conformance script and `wypoc/samples/decolib.wy` is a decorator library written in
-wyrm. When changing the AST, keep `wypoc/sexpr.py`'s table in step - a node kind with no
-row there cannot cross into a decorator, and `test/test_sexpr.py` asserts each kind's
-documented shape as well as that it round-trips.
+wyrm. When changing the AST, keep `wypoc/sexpr.py`'s encoder and decoder in step - a node
+kind with no entry there cannot cross into a decorator, and `test/test_sexpr.py` asserts
+each kind's canonical shape as well as that it round-trips. The shapes are the wyrm
+project's canonical AST; its conformance corpus (`project/conformance/`, checked with
+`check.py --producer wypoc`) is the authority for them.
 
 ## Commands
 

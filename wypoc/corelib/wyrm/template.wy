@@ -1,0 +1,18 @@
+# `@template` - marks a definition written to be quoted (design syntax.md
+# G7): a tree whose code may never run, read through `name::$ast`.
+#
+#     import wyrm::template::*
+#
+#     @template
+#     fn $tmpl(e):
+#         this ! peek(0)
+#
+# The decorator answers the definition wrapped in an annotation,
+# `(annotate template (true) <definition>)`, for the compiler to read. A
+# compiler lowers the definition as usual, and if lowering fails it emits a
+# trap in its place instead of an error. This interpreter never lowers
+# anything, so for it the annotation changes nothing: the definition runs
+# as written, and `name::$ast` is its tree without the annotation.
+
+fn [TreeBase] template():
+    return $['annotate, 'template, $['true], sexpr(this)]

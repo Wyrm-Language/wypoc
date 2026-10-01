@@ -1,0 +1,4 @@
+# wyrm package init: the language-level library modules (wyrm::template,
+# wyrm::tokenizer). Its presence makes `import wyrm::...` resolve `wyrm` as
+# a package - see wypoc/wyrm_modules.py.
+pass

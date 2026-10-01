@@ -1,9 +1,8 @@
-# Decorators and the canonical s-expression wire format (see wypoc/sexpr.py).
+# Decorators and the canonical tree (see wypoc/sexpr.py).
 #
 # The first half drives the format through two native decorators: `@__dump`
-# prints the s-expression a decorator would receive and compiles the original
-# tree, `@__identity` rebuilds the tree from its s-expression and compiles
-# that. Every `@__identity` therefore proves a round trip - the value printed
+# prints the tree a decorator would receive and compiles the original,
+# `@__identity` rebuilds the AST from its tree and compiles that. Every `@__identity` therefore proves a round trip - the value printed
 # is what survived encode + decode.
 #
 # The second half uses decorators written in wyrm (samples/decolib.wy), which
@@ -102,8 +101,7 @@ println("fn: " + str(add(2, 3)))
 
 println("typed: " + str(measured(5)))
 
-# `*rest` travels in its own position, not as a flag on a parameter, and
-# rejoins the parameter list on the way back.
+# `*rest` is a marked entry of the parameter list, `(* others (type auto))`.
 @__dump fn spread(a: int, *others) -> int:
     return a
 
@@ -122,8 +120,9 @@ println("rest params: " + str(count_args(1, 2, 3, 4)))
 
 # --- statements in a body -------------------------------------------------
 
-# A body is a statement list, not an opaque handle, so every statement kind
-# below makes the round trip and comes back compiling to the same thing.
+# A body is one form - the statement, or `(do ...)` for several - not an
+# opaque handle, so every statement kind below makes the round trip and
+# comes back compiling to the same thing.
 @__identity fn control(n):
     total := 0
     i := 0
@@ -152,9 +151,8 @@ println("control: " + str(control(5)))
     later ?= 7
     lst := [0, 0]
     lst[1] = 5
-    with:
-        x = 2
-        y = 3
+    x := 2
+    y := 3
     return seen + d["a"] + car(p) + later + lst[1] + x + y
 
 println("bindings: " + str(bindings()))
@@ -173,7 +171,7 @@ println("bindings again: " + str(bindings()))
 
 println("failure: " + failure(3))
 
-# `catch return` and `try` are their own kinds - `catch` carries no flag.
+# A `catch return` handler is just a `return` node; `try` is its own kind.
 @__identity fn guarded(a, b):
     quotient := a / b catch return "divided by zero"
     doubled := try quotient * 2
@@ -191,7 +189,7 @@ println("guarded zero: " + guarded(10, 0))
 println("nested fn: " + str(nests()))
 
 # Nesting is outside-in: @__dump receives @__identity's *un*expanded
-# application raw (a 'decorated node, not a 'fn), and prints it that way.
+# application raw (a `decorate` node, not a `fn_def`), and prints it that way.
 # The compiled result is unaffected - __dump answers `this` unchanged, and
 # that answer is fully expanded (via sexpr()'s auto-expand) on its way back
 # in, same as any other decorator's answer.
@@ -287,8 +285,8 @@ announced()
 
 # --- the `__sexpr` hook ---------------------------------------------------
 #
-# `sexpr(x)` is the identity on an s-expression and unwraps a TreeBase, but a
-# class asked first can answer for itself.
+# `sexpr(x)` is the identity on a tree and unwraps a TreeBase, but a class
+# asked first can answer for itself.
 
 println("hook in class body: " + str(sexpr(decolib::Literal(7))))
 println("hook from outside: " + str(sexpr(decolib::Boxed(5))))

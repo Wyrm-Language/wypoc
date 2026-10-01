@@ -10,7 +10,7 @@ from wypoc.parse import parse
 SOURCE = """import std::io
 import util::helpers::(compute, tidy as clean)
 
-with LIMIT: int = 10
+var LIMIT: int = 10
 
 class Shape:
     slot sides: int = 3
@@ -49,7 +49,7 @@ def test_module_level_declarations(table):
     assert top["io"] == symbols.IMPORT
     assert top["compute"] == symbols.IMPORT
     assert top["clean"] == symbols.IMPORT, "an aliased item is bound under its alias"
-    assert top["LIMIT"] == symbols.CONSTANT
+    assert top["LIMIT"] == symbols.VARIABLE
     assert top["Shape"] == symbols.CLASS
     assert top["area"] == symbols.METHOD, "a bracketed fn is a message overload"
     assert top["counter"] == symbols.COROUTINE
@@ -89,7 +89,7 @@ def test_detail_lines_render_signatures(table):
     assert named(table, "area").detail == "fn [Shape] area(s) -> float"
     assert named(table, "counter").detail == "co counter(start: int) -> int"
     assert named(table, "sides").detail == "slot sides: int = ..."
-    assert named(table, "LIMIT").detail == "with LIMIT: int"
+    assert named(table, "LIMIT").detail == "var LIMIT: int"
 
 
 def test_message_overloads_are_collected(table):

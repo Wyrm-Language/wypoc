@@ -47,16 +47,17 @@ def test_the_pair_list_sigil_still_parses():
     assert isinstance(tree.body[0].values[0], ast.Pair)
 
 
-def test_ast_is_a_definitions_own_tree():
+def test_ast_is_an_ordinary_path():
+    """`foo::$ast` is a plain `::` path (design syntax.md G7); the evaluator
+    resolves the `$ast` segment."""
     from wypoc import ast_nodes as ast
 
     tree = parse("x := foo::$ast\n")
-    assert isinstance(tree.body[0].values[0], ast.AstRef)
+    value = tree.body[0].values[0]
+    assert isinstance(value, ast.Scope) and value.name == "$ast"
 
 
 def test_another_dollar_name_after_a_scope_is_a_plain_lookup():
-    """Only `$ast` is built; `foo::$whatever` is now an ordinary `::` lookup
-    of a name that happens to be spelled with a `$`, not a syntax error."""
     from wypoc import ast_nodes as ast
 
     tree = parse("x := foo::$line\n")
@@ -70,9 +71,9 @@ def test_another_dollar_name_after_a_scope_is_a_plain_lookup():
     "fn f($ast): pass\n",
     "var $ast: int\n",
 ])
-def test_ast_is_reserved_everywhere_else(src):
-    with pytest.raises(SyntaxError):
-        parse(src)
+def test_dollar_names_are_ordinary_names(src):
+    """No `$` name is reserved (G7)."""
+    assert parse(src).body
 
 
 # --------------------------------------------------------------------------
@@ -105,3 +106,29 @@ def test_a_type_named_with_a_not_prefix_is_still_a_plain_check():
     value = parse("x := a is not_a_type\n").body[0].values[0]
     assert isinstance(value, ast.TypeCheck)
     assert [t.parts for t in value.types] == [["not_a_type"]]
+
+
+# --------------------------------------------------------------------------
+# Statements need a separator (design syntax.md G0).
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("src", [
+    "f() g()\n",
+    "with x = 1\n",
+    "x := a if b else c\n",
+    "x := a < b < c\n",
+])
+def test_juxtaposed_statements_are_a_syntax_error(src):
+    with pytest.raises(SyntaxError):
+        parse(src)
+
+
+@pytest.mark.parametrize("src", [
+    "f(); g()\n",
+    "while c { f(); g() }\n",
+    "f := fn():\n    1\ng()\n",
+    "x := str(do: 1)\n",
+    "if a { f() } g()\n",
+])
+def test_a_statement_ends_at_a_separator_or_its_block(src):
+    assert parse(src).body

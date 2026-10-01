@@ -7,7 +7,7 @@ e := 'name
 f := "this is a string"
 
 g := """This is a string
-this is still part of the string.""
+this is still part of the string."""
 
 h := R"(Arbitrary Text)"
 i := R"extra(WE can noow have (" )extra"
@@ -21,6 +21,5 @@ n := -5.5
 o := 1.0e10
 p := 1e-10
 
-with:
-    speed_of_light: float = 299_792_458.0
-    gravitational_constant = 6.6743e-11
+var speed_of_light: float = 299_792_458.0
+gravitational_constant := 6.6743e-11

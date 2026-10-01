@@ -88,7 +88,7 @@ ROUND_TRIPPED = {
     "or": "true",
     "tuple": "(1, 2)",
     "grouped": "7",
-    "pairlist": "$[1, 2]",
+    "pairlist": "(1 2)",
     "dict": '{"a": 1}',
     "is": "true",
     "do": "42",
@@ -136,30 +136,30 @@ def test_a_static_local_survives_the_round_trip(printed, output):
     ]
 
 
-def test_dump_prints_the_s_expression_it_would_receive(output):
-    assert output[0] == "$['int, 41]"
-    assert output[1] == "$['str, \"text\"]"
+def test_dump_prints_the_tree_it_would_receive(output):
+    assert output[0] == "(int 41)"
+    assert output[1] == '(str "text")'
     assert output[2] == "dumped: 41 text", "and compiles the original tree"
 
 
 def test_dump_shows_a_signature_with_its_types(output):
-    dumped = [line for line in output if line.startswith("$['fn, 'typed")]
+    dumped = [line for line in output if line.startswith("(fn_def typed")]
     assert dumped == [
-        "$['fn, 'typed, [$['type, 'int]], nil, nil, "
-        "[$['param, 'a, $['type, 'int]], "
-        "$['param, 'b, $['type, 'str]], "
-        "$['param, 'c, $['type, $['qualified_name, 'shapes, 'Circle]]]], [], "
-        "[$['return, $['name, 'a]]]]"
+        "(fn_def typed () ((a (type int) ()) (b (type str nil) ()) "
+        "(c (type (:: shapes Circle)) ())) (type int) (return a))"
     ]
 
 
-def test_dump_shows_the_rest_parameter_in_its_own_position(output):
-    dumped = [line for line in output if line.startswith("$['fn, 'spread")]
+def test_dump_shows_the_rest_parameter_as_a_marked_entry(output):
+    dumped = [line for line in output if line.startswith("(fn_def spread")]
     assert dumped == [
-        "$['fn, 'spread, [$['type, 'int]], $['param, 'others, nil], nil, "
-        "[$['param, 'a, $['type, 'int]]], [], "
-        "[$['return, $['name, 'a]]]]"
+        "(fn_def spread () ((a (type int) ()) (* others (type auto))) (type int) (return a))"
     ]
+
+
+def test_dump_shows_an_unexpanded_inner_decorator(output):
+    assert ("(decorate __identity (fn_def nested () ((x (type auto) ())) "
+            "(type auto) (return x)))") in output
 
 
 # --- decorators written in wyrm -------------------------------------------
@@ -210,15 +210,15 @@ def test_a_template_may_be_named_at_the_use_site(output):
 # --- $ast and the __sexpr hook --------------------------------------------
 
 AST_AND_HOOK = {
-    "$ast head": "fn",
+    "$ast head": "fn_def",
     "$ast name": "plain",
     "$ast is a tree": "true",
-    "$ast across modules": "fn",
-    "hook in class body": "$['int, 7]",
-    "hook from outside": "$['int, 10]",
-    "hook inherited": "$['int, 10]",
-    "no hook is identity": "$['int, 3]",
-    "a TreeBase still unwraps": "fn",
+    "$ast across modules": "fn_def",
+    "hook in class body": "(int 7)",
+    "hook from outside": "(int 10)",
+    "hook inherited": "(int 10)",
+    "no hook is identity": "(int 3)",
+    "a TreeBase still unwraps": "fn_def",
     "returned object": "42",
 }
 
@@ -236,29 +236,25 @@ def test_ast_references_and_the_sexpr_hook(printed, label, expected):
 
 def _sexpr_of(src: str) -> str:
     """Evaluates `sexpr(parse(src))`, as `display()` would show it - the
-    same `$[...]` form samples/decorators.wy's own sexpr assertions use."""
+    same D2 form samples/decorators.wy's own sexpr assertions use."""
     ctx = run(f'x := sexpr(parse("{src}"))\n')
     return wyrm_builtins.display(ctx["x"].value)
 
 
 def test_parse_of_one_statement_unboxes_to_its_own_tree():
-    assert _sexpr_of("v := 5") == "$['define, 'v, $['type, 'auto], $['int, 5]]"
+    assert _sexpr_of("v := 5") == "(define v (type auto) (int 5))"
 
 
 def test_parse_of_one_expression_unboxes_to_its_own_tree():
-    assert _sexpr_of("1 + 2") == "$['expr_stmt, $['binop, '+, $['int, 1], $['int, 2]]]"
+    assert _sexpr_of("1 + 2") == "(+ (int 1) (int 2))"
 
 
 def test_parse_of_several_statements_is_a_list_of_boxed_trees():
     ctx = run('xs := parse("a := 1\\nb := 2")\nx := sexpr(xs[0])\ny := sexpr(xs[1])\n')
     assert isinstance(ctx["xs"].value, list)
     assert len(ctx["xs"].value) == 2
-    assert wyrm_builtins.display(ctx["x"].value) == (
-        "$['define, 'a, $['type, 'auto], $['int, 1]]"
-    )
-    assert wyrm_builtins.display(ctx["y"].value) == (
-        "$['define, 'b, $['type, 'auto], $['int, 2]]"
-    )
+    assert wyrm_builtins.display(ctx["x"].value) == "(define a (type auto) (int 1))"
+    assert wyrm_builtins.display(ctx["y"].value) == "(define b (type auto) (int 2))"
 
 
 def test_parse_of_blank_source_is_nil():
@@ -336,7 +332,7 @@ def test_a_decorator_answering_a_non_tree_is_an_error():
     with pytest.raises(DecoratorError) as excinfo:
         run(src)
     assert "@broken" in str(excinfo.value)
-    assert "must be a $[...] list" in str(excinfo.value)
+    assert "a node must be a symbol or a list, not a int" in str(excinfo.value)
 
 
 def test_a_decorator_answering_a_statement_in_expression_position_is_an_error():
@@ -351,15 +347,28 @@ def test_a_decorator_answering_a_statement_in_expression_position_is_an_error():
 
 
 def test_a_decorator_handed_a_tree_that_cannot_cross_names_the_construct():
+    """wypoc's own `thread`/`task`/`signal`/`emit` have no canonical tree
+    yet, so a decorator can't be handed one."""
+    src = (
+        "fn [TreeBase] any_tree():\n"
+        "    return this\n"
+        "x := @any_tree thread a::b\n"
+    )
+    with pytest.raises(DecoratorError) as excinfo:
+        run(src)
+    assert "a thread spawn has no canonical tree yet" in str(excinfo.value)
+
+
+def test_a_coroutine_crosses_into_a_decorator():
     src = (
         "fn [TreeBase] any_tree():\n"
         "    return this\n"
         "@any_tree co counter(n):\n"
         "    yield n\n"
+        "c := counter(4)\n"
+        "v := next(c)\n"
     )
-    with pytest.raises(DecoratorError) as excinfo:
-        run(src)
-    assert "a coroutine cannot cross into a decorator yet" in str(excinfo.value)
+    assert run(src)["v"].value == 4
 
 
 def test_a_qualified_decorator_name_is_a_syntax_error():
@@ -429,7 +438,7 @@ def test_import_static_adopts_the_modules_messages():
 def test_a_local_definition_wins_over_an_adopted_one():
     src = (
         "fn [TreeBase] unchanged():\n"
-        "    return $['fn, 'f, [], nil, nil, [], [], [$['return, $['int, 7]]]]\n"
+        "    return $['fn_def, 'f, nil, nil, $['type, 'auto], $['return, $['int, 7]]]\n"
         "import static decolib\n"
         "@unchanged fn f():\n"
         "    return 0\n"
@@ -447,7 +456,7 @@ def test_script_root_makes_a_neighbouring_module_importable(tmp_path, monkeypatc
 
     (tmp_path / "lib.wy").write_text(
         "fn [TreeBase] to_nine():\n"
-        "    return $['fn, 'g, [], nil, nil, [], [], [$['return, $['int, 9]]]]\n"
+        "    return $['fn_def, 'g, nil, nil, $['type, 'auto], $['return, $['int, 9]]]\n"
     )
     script = tmp_path / "main.wy"
     script.write_text("import static lib\n@to_nine fn g():\n    return 0\n")
@@ -471,21 +480,36 @@ def test_samples_dir_is_where_the_conformance_script_lives():
     assert os.path.isfile(os.path.join(SAMPLES_DIR, "decolib.wy"))
 
 
-def test_template_decorator_is_a_pass_through():
-    """`@template` (epic 10a) marks a tree as a template; this POC ignores the
-    marking and answers the definition unchanged, so it still binds and runs."""
+def test_template_annotates_the_definition_it_is_given():
+    """`@template` (corelib/wyrm/template.wy, design syntax.md G7) answers
+    `(annotate template (true) <definition>)`. This interpreter never
+    lowers anything, so the definition still binds and runs, and its
+    `$ast` is the definition without the annotation."""
     from wypoc.wyrm_eval_parse_tree import call_value
 
-    ctx = run("@template\nfn f():\n    return 3\n")
+    ctx = run(
+        "import wyrm::template::*\n"
+        "@template\nfn f():\n    return 3\n"
+        "head := car(sexpr(f::$ast))\n"
+        "fn [TreeBase] peek():\n    return $['sym, car(sexpr(this))]\n"
+        "seen := @peek @template 1\n"
+    )
     assert call_value(ctx["f"].value, [], {}) == 3
+    assert ctx["head"].value == wyrm_builtins.Symbol("fn_def")
+    assert ctx["seen"].value == wyrm_builtins.Symbol("annotate")
 
 
-def test_a_user_defined_template_decorator_shadows_the_predefined_one():
+def test_template_is_not_predefined():
+    with pytest.raises(DecoratorError):
+        run("@template\nfn f():\n    return 3\n")
+
+
+def test_a_user_defined_template_decorator_is_an_ordinary_one():
     from wypoc.wyrm_eval_parse_tree import call_value
 
     src = (
         "fn [TreeBase] template():\n"
-        "    return $['fn, 'f, [], nil, nil, [], [], [$['return, $['int, 9]]]]\n"
+        "    return $['fn_def, 'f, nil, nil, $['type, 'auto], $['return, $['int, 9]]]\n"
         "@template\nfn f():\n    return 0\n"
     )
     ctx = run(src)

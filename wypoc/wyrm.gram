@@ -1,19 +1,18 @@
 @subheader """
 from wypoc.actions import (
-    fold_left, make_assignment_stmt, make_static_import, make_string_literal,
+    at_statement_end, fold_left, make_assignment_stmt, make_static_import, make_string_literal,
     make_tuple, make_type_expr, fold_postfix, fold_index_target, names, spans,
     tail, tok_pos, with_pos,
 )
 from wypoc.ast_nodes import (
     Program, Pass, ExprStmt, Return, Yield, ElifClause, If, While, For,
     Continue, Break, NameTarget,
-    AttrTarget, Assign, VarTarget, VarDecl, StaticDecl, TypeExpr, WithSimple,
-    WithBinding, WithBlock, Import, ImportItem, FromImport, Param,
-    VarPositional, VarKeyword, FnDef, CoDef, ClassDef, SlotOption, SlotDef,
+    AttrTarget, Assign, VarTarget, VarDecl, StaticDecl, TypeExpr, TypeUnion,
+    Import, ImportItem, Param,
+    VarPositional, VarKeyword, FnDef, CoDef, ClassDef, ClassExpr, SlotDef,
     SignalDef, Emit,
-    Num, Str, Char, Bool, Symbol, EllipsisExpr, Name, AstRef, ThisRef,
-    SuperCall, Defined,
-    Lambda, Do, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
+    Num, Str, Char, Bool, Symbol, EllipsisExpr, Name,
+    Lambda, CoLambda, Do, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
     Kwarg, SpreadPos, SpreadKw, UnaryOp, BinOp, SetIfUnset, Call, Index,
     Attr, Message, Scope, Defer, Try, Catch, TypeCheck, Decorator, Decorated,
     ThreadSpawn, TaskSpawn,
@@ -48,16 +47,13 @@ from wypoc.ast_nodes import (
 #    "." tokens.
 #  * elif/else on `if`, like the EBNF itself, are INFERRED (not shown
 #    verbatim in the spec prose).
-#  * `catch`'s handler accepts `return EXPR` or a plain `or_expr`; `try` and
-#    `catch` are composable (`try EXPR catch HANDLER`) though the spec only
-#    shows them separately. Both are INFERRED shapes - the spec's prose and
-#    its one `catch return 0` example are the only constraints given.
-#  * `on` / `error` in `defer on error` are soft keywords (double-quoted),
-#    not reserved words, so plain identifiers like a slot named `on` are
-#    unaffected. `$ast` in `foo::$ast` is matched the same way (one NAME
-#    token, spelled out here) - but that one *is* reserved everywhere, by
-#    parse.py rather than by this grammar, since pegen only knows how to
-#    reserve a word that looks like a Python identifier.
+#  * `catch` binds tighter than `try` (design syntax.md G1): `try` takes a
+#    catch_expr operand, and `catch`'s handler is `return EXPR` or a full
+#    expression, so `a catch b catch c` nests right.
+#  * `on` in `defer on T` is a soft keyword (double-quoted), not a reserved
+#    word, so plain identifiers like a slot named `on` are unaffected.
+#  * `this`, `super` and `defined` are ordinary names (design syntax.md G4),
+#    and `name::$ast` is an ordinary `::` path (G7): none has a rule here.
 #  * A symbol literal (`'name`, `'+`, `'fn`) is one token from the tokenizer
 #    rather than `"'"` + a name here, because a symbol's name may be a
 #    reserved word - `'fn`, `'return`, `'if` are all node kinds in the
@@ -120,14 +116,18 @@ stmt_item[object]:
 brace_stmt_item[object]:
     | s=compound_stmt NEWLINE* { [s] }
     | first=simple_stmt NEWLINE+ { [first] }
-    | first=simple_stmt { [first] }
+    | first=simple_stmt { [first] if at_statement_end(self) else None }
 
+# A statement ends at a separator (`;` or a newline) or where its block ends
+# (see actions.at_statement_end); `f() g()` is two juxtaposed statements and
+# a syntax error (design syntax.md G0). An action answering None fails its
+# alternative, which is how that last check rejects one.
 simple_stmt_line[object]:
     | first=simple_stmt ";" rest=simple_stmt_line { [first] + rest }
     | first=simple_stmt ";" NEWLINE { [first] }
     | first=simple_stmt ";" { [first] }
     | first=simple_stmt NEWLINE { [first] }
-    | first=simple_stmt { [first] }
+    | first=simple_stmt { [first] if at_statement_end(self) else None }
 
 # A decorator in front of a *simple* statement needs no rule of its own: a
 # simple statement that could carry one is an expression statement, and
@@ -137,11 +137,9 @@ simple_stmt_line[object]:
 # never puts there. `@d fn f(): ...` does need the compound_stmt rule below:
 # there the tree must stay a definition so the name survives the rewrite.
 simple_stmt[object]:
-    | with_stmt_simple
     | static_stmt
     | var_stmt
     | assignment_stmt
-    | from_import_stmt
     | import_stmt
     | return_stmt
     | yield_stmt
@@ -160,7 +158,7 @@ compound_stmt[object]:
     | fn_def
     | co_def
     | class_def
-    | with_block
+    | slot_def
     | defer_stmt
 
 # ---- decorators ----------------------------------------------------------
@@ -190,7 +188,9 @@ decorator[object]:
 
 pass_stmt[object]: 'pass' { Pass(LOCATIONS) }
 continue_stmt[object]: 'continue' { Continue(LOCATIONS) }
-break_stmt[object]: 'break' { Break(LOCATIONS) }
+break_stmt[object]:
+    | 'break' e=expression { Break(e, LOCATIONS) }
+    | 'break' { Break(None, LOCATIONS) }
 
 expr_stmt[object]: e=expression { ExprStmt(e, LOCATIONS) }
 
@@ -236,13 +236,13 @@ for_stmt[object]:
     | 'for' n=NAME 'in' it=expression body=block orelse=else_clause? { For(n.string, it, body, orelse, var_pos=tok_pos(n), LOCATIONS) }
 
 # ---- defer statement ------------------------------------------------------
-# `on`/`error` are soft keywords (double-quoted below) rather than reserved
-# words, so e.g. `slot on: bool` (see wypoc/samples/compile_class_def.wy)
-# keeps working - only literal `defer on error` triggers this form.
+# `on` is a soft keyword (double-quoted below) rather than a reserved word,
+# so e.g. `slot on: bool` (see wypoc/samples/compile_class_def.wy) keeps
+# working. `defer on T:` runs only on an error exit, whatever T is.
 
 defer_stmt[object]:
-    | 'defer' "on" "error" body=block { Defer(True, body, LOCATIONS) }
-    | 'defer' body=block { Defer(False, body, LOCATIONS) }
+    | 'defer' "on" t=ann_type body=block { Defer(t, body, LOCATIONS) }
+    | 'defer' body=block { Defer(None, body, LOCATIONS) }
 
 # ---- variable declarations / assignment ---------------------------------
 #
@@ -277,9 +277,6 @@ target[object]:
     | base=target_base idxs=target_index_suffix* { fold_index_target(base, idxs) }
 
 target_base[object]:
-    | t='this' rest=("." NAME)+ {
-          AttrTarget(ThisRef(tok_pos(t)), names(tail(rest)),
-                     base_pos=tok_pos(t), attrs_pos=spans(tail(rest)), LOCATIONS) }
     | n=NAME rest=("." NAME)+ {
           AttrTarget(n.string, names(tail(rest)),
                      base_pos=tok_pos(n), attrs_pos=spans(tail(rest)), LOCATIONS) }
@@ -308,31 +305,11 @@ type_expr[object]:
 # An annotation position (return type, param/slot/variable type, coroutine
 # input type, ...) accepts a `|`-unioned type per doc/language-spec.md
 # ("Type constraints may represent summation types as well", used
-# throughout the spec's prose as e.g. `-> int | error`). This POC doesn't
-# model types at runtime beyond a couple of decorative checks (see
-# wyrm_eval_parse_tree.py's _zero_value/_matches_type), so a union
-# annotation parses fully but keeps only its first arm - good enough to
-# accept the spec's own examples
-# without needing every annotation field to become a list.
+# throughout the spec's prose as e.g. `-> int | error`): one TypeExpr, or a
+# TypeUnion of two or more.
 ann_type[object]:
-    | first=type_expr ("|" type_expr)* { first }
-
-# ---- immutable bindings --------------------------------------------------
-
-with_stmt_simple[object]:
-    | 'with' n=NAME ty=(":" ann_type)? "=" e=assign_expr {
-          WithSimple(n.string, ty[1] if ty else None, e, name_pos=tok_pos(n), LOCATIONS) }
-
-with_block[object]:
-    | 'with' ":" NEWLINE INDENT bindings=with_binding_list DEDENT { WithBlock(bindings, LOCATIONS) }
-
-with_binding_list[object]:
-    | first=with_binding NEWLINE rest=with_binding_list { [first] + rest }
-    | first=with_binding NEWLINE { [first] }
-    | first=with_binding { [first] }
-
-with_binding[object]:
-    | n=NAME ty=(":" ann_type)? "=" e=assign_expr { WithBinding(n.string, ty[1] if ty else None, e, name_pos=tok_pos(n), LOCATIONS) }
+    | first=type_expr rest=("|" type_expr)+ { TypeUnion([first] + tail(rest), LOCATIONS) }
+    | type_expr
 
 # ---------------------------------------------------------------------
 # Modules and imports
@@ -396,10 +373,6 @@ import_item[object]:
 
 import_item_list[object]:
     | first=import_item rest=("," import_item)* { [first] + tail(rest) }
-
-from_import_stmt[object]:
-    | 'from' m=module_path 'import' ns=name_list {
-          FromImport(names(m), names(ns), path_pos=spans(m), names_pos=spans(ns), LOCATIONS) }
 
 name_list[object]:
     | first=NAME rest=("," NAME)* { [first] + tail(rest) }
@@ -484,35 +457,30 @@ co_def[object]:
 # get an automatic trailing-comma wrap that plain rule references don't,
 # so a genuinely empty member list would otherwise make class_def's whole
 # alternative look like a failed match. class_def unwraps with body[0].
+#
+# A class has at most one base (design ast.md "Classes"), None when absent.
+# Its body is an ordinary block; which statements may appear there is the
+# evaluator's call (design syntax.md G0), see wyrm_eval_parse_tree.Class.
 class_def[object]:
-    | 'class' n=NAME "(" bases=arg_list? ")" body=class_block {
-          ClassDef(n.string, bases or [], body[0], name_pos=tok_pos(n), LOCATIONS) }
-    | 'class' n=NAME body=class_block { ClassDef(n.string, [], body[0], name_pos=tok_pos(n), LOCATIONS) }
+    | 'class' n=NAME "(" base=class_base? ")" body=class_block {
+          ClassDef(n.string, base, body[0], name_pos=tok_pos(n), LOCATIONS) }
+    | 'class' n=NAME body=class_block { ClassDef(n.string, None, body[0], name_pos=tok_pos(n), LOCATIONS) }
+
+class_base[object]:
+    | b=assign_expr ","? { b }
 
 class_block[object]:
-    | ":" NEWLINE INDENT members=class_member_item* DEDENT { (members,) }
-    | "{" NEWLINE* members=class_member_brace* "}" { (members,) }
+    | ":" NEWLINE INDENT stmts=stmt_item* DEDENT { ([s for group in stmts for s in group],) }
+    | ":" stmts=simple_stmt_line { (stmts,) }
+    | "{" NEWLINE* stmts=brace_stmt_item* "}" { ([s for group in stmts for s in group],) }
 
-class_member_brace[object]:
-    | m=fn_def NEWLINE* { m }
-    | m=co_def NEWLINE* { m }
-    | m=slot_def NEWLINE* { m }
-    | m=signal_def NEWLINE* { m }
-    | m=static_stmt NEWLINE* { m }
-
-class_member_item[object]:
-    | m=fn_def NEWLINE? { m }
-    | m=co_def NEWLINE? { m }
-    | m=slot_def NEWLINE { m }
-    | m=slot_def { m }
-    | m=signal_def NEWLINE { m }
-    | m=signal_def { m }
-    | m=static_stmt NEWLINE? { m }
-
+# A virtual slot has a block defining `fn getter`/`fn setter` (design
+# syntax.md G3). A default and a block together parse; the evaluator
+# rejects the combination (G0).
 slot_def[object]:
-    | 'slot' n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? opts=('with' slot_options)? {
+    | 'slot' n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? body=block? {
           SlotDef(n.string, ty[1] if ty else None, dflt[1] if dflt else None,
-                  opts[1] if opts else None, name_pos=tok_pos(n), LOCATIONS) }
+                  body, name_pos=tok_pos(n), LOCATIONS) }
 
 # `signal name(item: int, item: str)` - same param_list fn_def itself uses
 # (see ast_nodes.SignalDef), documenting a signature nothing enforces at
@@ -523,22 +491,6 @@ slot_def[object]:
 signal_def[object]:
     | 'signal' n=NAME "(" params=param_list? ")" {
           SignalDef(n.string, params or [], name_pos=tok_pos(n), LOCATIONS) }
-
-slot_options[object]:
-    | ":" NEWLINE INDENT opts=slot_option_list DEDENT { opts }
-    | "{" opts=slot_option_brace* "}" { opts }
-
-slot_option_brace[object]:
-    | o=slot_option ";"? { o }
-
-slot_option_list[object]:
-    | first=slot_option NEWLINE rest=slot_option_list { [first] + rest }
-    | first=slot_option NEWLINE { [first] }
-    | first=slot_option { [first] }
-
-slot_option[object]:
-    | kind=('setter' | 'getter') "=" 'undefined' { SlotOption(kind.string, 'undefined', LOCATIONS) }
-    | kind=('setter' | 'getter') "=" e=assign_expr { SlotOption(kind.string, e, LOCATIONS) }
 
 # No dedicated constructor syntax: `init` is just an ordinary fn_def member
 # (`fn init(...): ...`), promoted to the class's constructor by name alone -
@@ -560,25 +512,27 @@ assign_expr[object]:
     | 'yield' e=expression { Yield(e, LOCATIONS) }
     | 'yield' { Yield(None, LOCATIONS) }
     | a=or_expr "?=" b=or_expr { SetIfUnset(a, b, LOCATIONS) }
-    | catch_expr
+    | try_expr
 
 # ---- try / catch ---------------------------------------------------------
 # `try EXPR` returns immediately from the enclosing function if EXPR's value
 # is an error; `EXPR catch HANDLER` substitutes HANDLER's value instead
-# (HANDLER may itself be `return EXPR`). The two compose: `try EXPR catch ...`.
+# (HANDLER may itself be `return EXPR`). `catch` binds tighter than `try`
+# (design syntax.md G1): `try f() catch 0` is `try (f() catch 0)`, and a
+# handler is a full expression, so `a catch b catch c` nests right.
+
+try_expr[object]:
+    | 'try' e=catch_expr { Try(e, LOCATIONS) }
+    | catch_expr
 
 catch_expr[object]:
-    | v=try_operand 'catch' h=catch_handler { Catch(v, h, LOCATIONS) }
-    | try_operand
-
-try_operand[object]:
-    | 'try' e=or_expr { Try(e, LOCATIONS) }
+    | v=or_expr 'catch' h=catch_handler { Catch(v, h, LOCATIONS) }
     | or_expr
 
 catch_handler[object]:
     | 'return' e=expression { Return(e, LOCATIONS) }
     | 'return' { Return(None, LOCATIONS) }
-    | or_expr
+    | try_expr
 
 or_expr[object]:
     | first=and_expr rest=('or' and_expr)* { fold_left(first, [('or', e) for _, e in rest]) }
@@ -596,6 +550,7 @@ comparison[object]:
     # everything downstream (eval, sexpr, --compile) needs no new case.
     | a=bitwise_or_expr 'is' 'not' t=type_constraint { UnaryOp('not', TypeCheck(a, t, LOCATIONS), LOCATIONS) }
     | a=bitwise_or_expr 'is' t=type_constraint { TypeCheck(a, t, LOCATIONS) }
+    | a=bitwise_or_expr 'not' 'in' b=bitwise_or_expr { UnaryOp('not', BinOp('in', a, b, LOCATIONS), LOCATIONS) }
     | a=bitwise_or_expr op=comp_op b=bitwise_or_expr { BinOp(op, a, b, LOCATIONS) }
     | bitwise_or_expr
 
@@ -695,20 +650,13 @@ message_op[object]:
           (lambda node, name=n.string, np=tok_pos(n):
               Message(node, name, None, name_pos=np, LOCATIONS)) }
 
-# `foo::$ast` is a definition's own tree as a value - `::` because it
-# resolves a name statically in a namespace, where `.` would ask the
-# runtime value (a closure) for an attribute it hasn't got. `$` is an
-# ordinary identifier character now (see wyrm_tokenizer's _is_ident_cont),
-# so `$ast` arrives as one NAME token and is matched here by its exact
-# text: `foo::$whatever` is an ordinary `::` lookup of a name spelled with
-# a `$`, while `$ast` itself is reserved language-wide (parse.py refuses it
-# as a plain name, the way a keyword is refused).
+# `foo::$ast` is an ordinary `::` path (design syntax.md G7); the evaluator
+# resolves a `$ast` segment to the definition's tree (see _expr_scope).
 scope_op[object]:
-    | "::" "$ast" { (lambda node: AstRef(node, "ast", pos=getattr(node, 'pos', None))) }
     | "::" n=NAME { (lambda node, name=n.string, np=tok_pos(n): Scope(node, name, name_pos=np, pos=np)) }
 
 arg_list[object]:
-    | first=argument rest=("," argument)* { [first] + tail(rest) }
+    | first=argument rest=("," argument)* ","? { [first] + tail(rest) }
 
 argument[object]:
     | n=NAME "=" e=assign_expr { Kwarg(n.string, e, name_pos=tok_pos(n), LOCATIONS) }
@@ -724,12 +672,6 @@ primary[object]:
     | array_literal
     | pair_literal
     | dict_literal
-    | 'this' { ThisRef(LOCATIONS) }
-    | 'super' "(" args=arg_list? ")" { SuperCall(args or [], LOCATIONS) }
-    # `defined('foo)`'s operand is a symbol; it goes through the shared
-    # `literal` rule (symbols no longer have one of their own - see above)
-    # and eval_expr rejects any other literal kind there.
-    | 'defined' "(" s=literal ")" { Defined(s, LOCATIONS) }
     # `thread a::b::c` spawns `a::b::c` fresh on its own OS process (see
     # wyrm_remote.py) - an expression, not a call, since there's no
     # existing "launch on a new execution context" call syntax to reuse (a
@@ -737,6 +679,8 @@ primary[object]:
     # takes a module path instead, the same operand `import` takes).
     | 'thread' m=module_path { ThreadSpawn(names(m), path_pos=spans(m), LOCATIONS) }
     | lambda_expr
+    | co_lambda_expr
+    | class_expr
     | do_expr
     | if_expr
     | NAME { Name(name.string, LOCATIONS) }
@@ -761,7 +705,7 @@ ellipsis_literal[object]:
 
 # List/Array: a mutable, constant-time-indexable sequence.
 array_literal[object]:
-    | "[" items=expr_list? "]" { Array(items or [], LOCATIONS) }
+    | "[" items=expr_list? ","? "]" { Array(items or [], LOCATIONS) }
 
 # Pair list: $[] empty, $['a] single pair, $[1, 2, 3] proper pair list - a
 # low-level primitive critical to the AST's own representation (see
@@ -797,7 +741,24 @@ message_tuple_expr[object]:
           MessageTupleExpr(items, n.string, None, name_pos=tok_pos(n), LOCATIONS) }
 
 lambda_expr[object]:
-    | 'fn' "(" params=param_list? ")" body=block { Lambda(params or [], body, LOCATIONS) }
+    | 'fn' "(" params=param_list? ")" ret=("->" ann_type)? body=lambda_body {
+          Lambda(params or [], body, ret[1] if ret else None, LOCATIONS) }
+
+co_lambda_expr[object]:
+    | 'co' "(" cp=co_params? ")" ret=("->" ann_type)? body=lambda_body {
+          CoLambda(cp[1] if cp else [], cp[0] if cp else None, ret[1] if ret else None,
+                   body, LOCATIONS) }
+
+# A one-line body that a `,` or a closing bracket ends is one expression,
+# so `map(fn(x): x * 2, xs)` passes two arguments rather than a tuple.
+lambda_body[object]:
+    | ":" e=assign_expr &("," | ")" | "]" | "}") { [ExprStmt(e, pos=e.pos)] }
+    | block
+
+# An anonymous class (design ast.md "Classes"): `class(B): ...`, `class: ...`.
+class_expr[object]:
+    | 'class' "(" base=class_base? ")" body=class_block { ClassExpr(base, body[0], LOCATIONS) }
+    | 'class' body=class_block { ClassExpr(None, body[0], LOCATIONS) }
 
 # `do:` opens an anonymous, immediately-executed scope usable as an
 # expression - see doc/language-spec.md's "do" section and Do

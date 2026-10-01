@@ -15,12 +15,16 @@ from typing import Iterator, List, Tuple
 TokenInfo = tokenize.TokenInfo
 
 KEYWORDS = {
-    "and", "break", "catch", "class", "co", "continue", "defer", "defined",
-    "do", "elif", "else", "emit", "false", "fn", "for", "from", "getter", "if", "import",
-    "in", "is", "not", "or", "pass", "return", "setter", "signal",
-    "slot", "static", "super", "this", "true", "try", "undefined",
-    "var", "while", "with", "yield",
+    "and", "break", "catch", "class", "co", "continue", "defer",
+    "do", "elif", "else", "emit", "false", "fn", "for", "from", "if", "import",
+    "in", "is", "not", "or", "pass", "return", "signal",
+    "slot", "static", "true", "try",
+    "var", "while", "yield",
 }
+# Not included above: `this`, `super` and `defined` are ordinary names
+# (design syntax.md G4) - `this`/`super` are bound by the enclosing method.
+# `with`, `getter`, `setter` and `undefined` are gone with the `with`
+# statement and slot options (G3).
 # Not included above: "init" is no longer a reserved word - a class
 # constructor is just an ordinary method named `init` (see wyrm.gram's
 # class_member_item/fn_def). "new" was dropped entirely: classes are
@@ -69,9 +73,8 @@ def _is_ident_start(c: str) -> bool:
 
 
 def _is_ident_cont(c: str) -> bool:
-    # `$` is an ordinary identifier character (`$ast`, `reg$0`, `a$b`); only
-    # `$ast` itself is reserved, and that reservation is the parser's (see
-    # RESERVED_DOLLAR_NAMES below and parse.py), not the lexer's.
+    # `$` is an ordinary identifier character (`$ast`, `reg$0`, `a$b`), and
+    # no `$` name is reserved (design syntax.md G7).
     return c.isalnum() or c == "_" or c == "$"
 
 
@@ -85,11 +88,7 @@ def _starts_name(line: str, i: int) -> bool:
     return c == "$" and i + 1 < len(line) and _is_ident_start(line[i + 1])
 
 
-# `$`-names the language keeps for itself. `$ast` (a definition's own tree -
-# see wyrm.gram's scope_op) is the only one built; `$name`/`$line`/`$doc`
-# are the rest of the family it heads. The lexer scans them as the plain
-# NAMEs they now are; parse.py is what stops one being used as a variable.
-RESERVED_DOLLAR_NAMES = frozenset({"$ast"})
+
 
 
 class _Lexer:
@@ -418,8 +417,9 @@ class _Lexer:
         return TokenInfo(token.STRING, text, start, (self.lineno + 1, j), line)
 
     def _scan_multiline_string(self, start) -> TokenInfo:
-        # Opens with three double quotes, closes at the first bare `""`
-        # (two quotes) encountered thereafter, per doc/language-spec.md.
+        # Opens with three double quotes and closes at the next three
+        # (doc/language-spec.md). Escapes are kept as written, like a
+        # normal string's, so `\"""` doesn't close it.
         chars = ['"""']
         self.col += 3
         while True:
@@ -429,9 +429,13 @@ class _Lexer:
                     raise self.error("unterminated multiline string literal")
                 chars.append("\n")
                 continue
-            if c == '"' and self.peekc(1) == '"':
-                chars.append('""')
+            if c == "\\" and self.peekc(1) not in ("", "\n"):
+                chars.append(c + self.peekc(1))
                 self.col += 2
+                continue
+            if c == '"' and self.peekc(1) == '"' and self.peekc(2) == '"':
+                chars.append('"""')
+                self.col += 3
                 break
             chars.append(c)
             self.col += 1

@@ -56,8 +56,8 @@ class person:
     slot name: str = "John Doe"
 
 class person:
-    slot name: str = "John Doe" with:
-        setter = fn (value) { this.name = value; }
-        getter = undefined
+    slot _name: str = "John Doe"
+    slot name: str:
+        fn setter(value) { this._name = value; }
 
 (canvas, shape) ! draw()

@@ -199,12 +199,16 @@ class Continue(Node):
 
 @dataclass
 class Break(Node):
+    """`break` or `break value` - the value is the loop's value."""
+    value: Optional["Expr"] = None
     pos: Span = None
 
 
 @dataclass
 class Defer(Node):
-    on_error: bool
+    """`defer: body` (`on` None) or `defer on T: body`, which runs only on
+    an error exit. `on` is the type written after `on`."""
+    on: Optional["TypeExpr"]
     body: list
     pos: Span = None
 
@@ -250,7 +254,7 @@ class NameTarget(Node):
 
 @dataclass
 class AttrTarget(Node):
-    base: Union[str, "ThisRef"]
+    base: str
     attrs: list
     base_pos: Span = None
     attrs_pos: Optional[list] = None
@@ -310,33 +314,25 @@ class StaticDecl(Node):
 
 @dataclass
 class TypeExpr(Node):
+    """One type name, optionally `::`-qualified: `int`, `geo::Point`."""
     parts: list
     parts_pos: Optional[list] = None
     pos: Span = None
 
 
 @dataclass
-class WithSimple(Node):
-    name: str
-    type: Optional[TypeExpr]
-    value: "Expr"
-    name_pos: Span = None
+class TypeUnion(Node):
+    """A sum type, `int | str`: two or more TypeExprs. Wherever an
+    annotation is stored, it is a TypeExpr, a TypeUnion or None (no
+    annotation written)."""
+    members: list
     pos: Span = None
 
 
-@dataclass
-class WithBinding(Node):
-    name: str
-    type: Optional[TypeExpr]
-    value: "Expr"
-    name_pos: Span = None
-    pos: Span = None
 
 
-@dataclass
-class WithBlock(Node):
-    bindings: list
-    pos: Span = None
+
+
 
 
 # ---------------------------------------------------------------------
@@ -392,13 +388,6 @@ class Import(Node):
     pos: Span = None
 
 
-@dataclass
-class FromImport(Node):
-    path: list
-    names: list
-    path_pos: Optional[list] = None
-    names_pos: Optional[list] = None
-    pos: Span = None
 
 
 @dataclass
@@ -486,27 +475,26 @@ class CoDef(Node):
 
 @dataclass
 class ClassDef(Node):
+    """`class name(base): body` - at most one base, None when absent."""
     name: str
-    bases: list
+    base: Optional["Expr"]
     body: list
     name_pos: Span = None
     pos: Span = None
     doc: Optional[str] = None
 
 
-@dataclass
-class SlotOption(Node):
-    kind: str
-    value: "Union[Expr, str]"
-    pos: Span = None
 
 
 @dataclass
 class SlotDef(Node):
+    """`slot name: type = default`, or a virtual slot, `slot name: type:`
+    followed by a block (`body`) defining `fn getter`/`fn setter`. `body`
+    is None for a data slot."""
     name: str
     type: Optional[TypeExpr]
     default: Optional["Expr"]
-    options: Optional[list]
+    body: Optional[list] = None
     name_pos: Span = None
     pos: Span = None
 
@@ -589,41 +577,51 @@ class Name(Node):
     pos: Span = None
 
 
-@dataclass
-class AstRef(Node):
-    """`foo::$ast` - the tree of the definition `foo` names, as a value.
-
-    `::` rather than `.` because this resolves a *name* statically in a
-    namespace: the runtime value of `foo` is a closure, which is not the
-    thing being asked for. `$ast` is the first of a reserved `$`-family
-    (`$name`, `$line`, `$doc` are not built); anything else after `$` is a
-    parse error rather than a silently different meaning."""
-    obj: "Expr"
-    field: str = "ast"
-    pos: Span = None
 
 
-@dataclass
-class ThisRef(Node):
-    pos: Span = None
 
 
-@dataclass
-class SuperCall(Node):
-    args: list
-    pos: Span = None
 
 
-@dataclass
-class Defined(Node):
-    symbol: Symbol
-    pos: Span = None
 
 
 @dataclass
 class Lambda(Node):
+    """`fn(params) -> ret: body`, an anonymous function."""
     params: list
     body: list
+    ret: Optional[TypeExpr] = None
+    pos: Span = None
+
+
+@dataclass
+class CoLambda(Node):
+    """`co(<- intype, params) -> ret: body`, an anonymous coroutine."""
+    params: list
+    intype: Optional[TypeExpr]
+    ret: Optional[TypeExpr]
+    body: list
+    pos: Span = None
+    name = None
+
+
+@dataclass
+class ClassExpr(Node):
+    """`class(base): body`, or `class: body` - an anonymous class."""
+    base: Optional["Expr"]
+    body: list
+    pos: Span = None
+    name = None
+
+
+@dataclass
+class Annotate(Node):
+    """`(annotate key value target)` - compiler-visible metadata a
+    decorator attaches to `target` (see design ast.md "Annotations").
+    Evaluating it evaluates `target`; `name::$ast` strips it."""
+    key: str
+    value: "Expr"
+    target: "Node"
     pos: Span = None
 
 
@@ -788,8 +786,8 @@ class TypeCheck(Node):
 
 
 Expr = Union[
-    Num, Str, Char, Bool, Symbol, EllipsisExpr, Name, AstRef, ThisRef,
-    SuperCall, Defined, Lambda, Do, Array, Pair, Tuple, Dict,
+    Num, Str, Char, Bool, Symbol, EllipsisExpr, Name,
+    Lambda, CoLambda, ClassExpr, Annotate, Do, Array, Pair, Tuple, Dict,
     MessageTupleExpr, UnaryOp, BinOp, SetIfUnset, Call, Index, Attr,
     Message, Scope, Yield, Try, Catch, TypeCheck, Decorated,
 ]

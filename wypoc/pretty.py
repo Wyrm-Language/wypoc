@@ -6,8 +6,9 @@ a container, in an error message, or from `str()`. It's not what you want
 looking at a 40-slot object or a nested dict at a prompt, so this module
 renders the three shapes that get unreadable when they're long:
 
-    pair chain      lisp: `(1 2 3)`, parens rather than `$[1, 2, 3]`, with
-                     an improper tail spelled `(1 2 . 3)`
+    pair chain      Scheme s-expression form, as `str()` prints it (see
+                     sexp_print): `(1 2 3)`, `(a "s")`, an improper tail
+                     spelled `(1 2 . 3)`
     dict / array    JSON layout: one member per line, indented, closing
                      delimiter back at the opening line's indentation
     class instance  the shape of the class definition that would declare it:
@@ -24,7 +25,7 @@ its rendering is to look like the definition.
 The REPL uses this unless `:set compact` is on (see repl.py's OPTIONS), in
 which case results go back to `display`'s one-liners.
 """
-from wypoc import wyrm_builtins
+from wypoc import sexp_print, wyrm_builtins
 from wypoc.wyrm_builtins import NIL, Pair
 from wypoc.wyrm_eval_parse_tree import ClassInstance
 
@@ -62,9 +63,9 @@ def _flat(value) -> "str | None":
         return None
     if isinstance(value, Pair):
         items, tail = _chain(value)
-        parts = [_flat(item) for item in items]
+        parts = [_flat_element(item) for item in items]
         if tail is not None:
-            parts += [".", _flat(tail)]
+            parts += [".", _flat_element(tail)]
         if any(part is None for part in parts):
             return None
         return "(" + " ".join(parts) + ")"
@@ -82,6 +83,18 @@ def _flat(value) -> "str | None":
             return None
         return "[" + ", ".join(parts) + "]"
     return wyrm_builtins.display(value)
+
+
+def _is_container(value) -> bool:
+    return isinstance(value, (ClassInstance, Pair, dict, list))
+
+
+def _flat_element(value) -> "str | None":
+    """A pair list's element on one line: an atom in D2 form (a bare
+    symbol, `()` for nil), anything else as it would be on its own."""
+    if _is_container(value):
+        return _flat(value)
+    return sexp_print.write(value, other=wyrm_builtins.display)
 
 
 def _broken(value, indent: int, width: int) -> str:
@@ -110,9 +123,14 @@ def _broken_pair(value, indent: int, width: int) -> str:
     """
     items, tail = _chain(value)
     column = indent + 1
-    lines = [_render(item, column, column, width) for item in items]
+    def element(item, start):
+        if _is_container(item):
+            return _render(item, start, column, width)
+        return _flat_element(item)
+
+    lines = [element(item, column) for item in items]
     if tail is not None:
-        lines.append(". " + _render(tail, column + 2, column, width))
+        lines.append(". " + element(tail, column + 2))
     body = ("\n" + " " * column).join(lines)
     return f"({body})"
 

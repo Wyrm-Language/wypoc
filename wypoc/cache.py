@@ -30,8 +30,12 @@ just a miss, and `save` overwrites the stale entry, same as a first run.
 A cache directory holds one entry per script: the pickled tree above
 (`foo.wy_ast`, the tree walker's).
 
-Proof-of-concept only: pickle, no format versioning, no security
-hardening, no cross-interpreter guarantees.
+An entry also records `AST_FORMAT`, a digest of `ast_nodes.py`: changing
+the node classes changes it, so an entry pickled against the old shapes is a
+miss rather than a tree the evaluator no longer understands.
+
+Proof-of-concept only: pickle, no security hardening, no cross-interpreter
+guarantees.
 """
 import hashlib
 import os
@@ -41,6 +45,16 @@ from wypoc import config as config_mod
 
 CACHE_DIR_NAME = "__wycache__"
 CACHE_EXT = ".wy_ast"
+
+
+def _ast_format() -> str:
+    from wypoc import ast_nodes
+
+    with open(ast_nodes.__file__, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:16]
+
+
+AST_FORMAT = _ast_format()
 
 
 def _local_cache_dir(abs_script_path: str) -> str:
@@ -75,7 +89,8 @@ def load(script_path: str):
     try:
         with open(cache_path, "rb") as f:
             entry = pickle.load(f)
-        if (entry["source_path"] != os.path.abspath(script_path)
+        if (entry.get("format") != AST_FORMAT
+                or entry["source_path"] != os.path.abspath(script_path)
                 or entry["mtime"] != os.path.getmtime(script_path)):
             return None
         return entry["tree"]
@@ -95,6 +110,7 @@ def save(script_path: str, tree) -> None:
     next - go uncached, not a run-stopping error."""
     cache_path = cache_file_for(script_path)
     entry = {
+        "format": AST_FORMAT,
         "source_path": os.path.abspath(script_path),
         "mtime": os.path.getmtime(script_path),
         "tree": tree,

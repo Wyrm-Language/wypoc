@@ -1,5 +1,5 @@
-"""Parses samples/eval_defer_with_do.wy and checks basic-use `do`/`defer`/
-`with` semantics - see doc/language-spec.md's "do" and "Errors / RAII"
+"""Parses samples/eval_defer_with_do.wy and checks basic-use `do`/`defer`
+semantics - see doc/language-spec.md's "do" and "Errors / RAII"
 sections, and wyrm_eval_parse_tree.py's run_scoped_block/Scope.defers for
 the POC-level implementation (defer is tied to whichever block Scope it's
 lexically written in, not just the enclosing function call)."""
@@ -16,10 +16,6 @@ EXPECTED = {
     "per_iteration_log": "iter iter-cleanup iter iter-cleanup iter iter-cleanup ",
     "ok_result": 1,
     "defer_on_error_log": "on-error-ran ",
-    "pi_ish": 3.14,
-    "e_ish": 2.72,
-    "speed_of_light": 299_792_458.0,
-    "with_sum": pytest.approx(5.86),
 }
 
 
@@ -118,14 +114,6 @@ def test_defer_still_fires_once_per_level_through_deep_non_tail_recursion():
     for n in range(depth + 1):
         expected_log = expected_log * 100 + n
     assert ctx["log"].value == expected_log
-
-
-def test_with_binding_is_immutable():
-    from wypoc.parse import parse
-    from wypoc.wyrm_eval_parse_tree import eval_program
-
-    with pytest.raises(TypeError, match="immutable"):
-        eval_program(parse("with x: int = 5\nx = 6\n"), {})
 
 
 def test_defer_fires_per_loop_iteration_not_once():

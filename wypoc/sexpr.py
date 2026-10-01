@@ -1,72 +1,71 @@
-"""The canonical s-expression wire format: `wypoc.ast_nodes` <-> pair lists.
+"""The canonical tree: `wypoc.ast_nodes` <-> pair lists.
 
 This is the bridge a syntax tree crosses in and out of wyrm code. A decorator
-receives the s-expression of what it decorates and answers the s-expression to
-compile instead (see `doc/decorators.md`), so both directions have to agree
-exactly — which is why they read one table (`ROWS`) rather than two switches.
+receives the tree of what it decorates and answers the tree to compile
+instead, `name::$ast` hands one to wyrm code as data, and `wyrm --dump-ast`
+prints one. The shapes are the canonical AST, defined outside this repo in
+the wyrm project's design notes (`design/ast.md`, with the schema as data
+in `conformance/ast/schema.sexp`); `encode` produces them and `decode`
+reads them back.
 
-## Shape
+## Shape, in brief
 
-A node is a pair list whose head is a symbol naming the kind, followed by
-that kind's fields in a fixed order::
+Every list is a pair list. A node is `(head field ... tail ...)`: a fixed
+number of fields, then at most one spliced tail. A bare symbol in a root
+position (a statement, an operand, an argument) is a name reference; every
+other expression or statement is a headed node:
 
-    $['kind, field, field, ...]
+    x := nil           (define x (type auto) (nil))
+    f(a, k=1)          (apply f a (kwarg k (int 1)))
+    r ! m(1)           (apply (bind_msg r m) (int 1))
+    a and b and c      (and a b c)
+    if a: b            (cond (a b))
+    std::io::println   (:: std io println)
 
-`$['binop, '+, $['int, 1], $['int, 2]]` is `1 + 2`. Child *lists* are plain
-lists (`[...]`) rather than pair lists so `for` walks them directly, though a
-pair list handed back in a child-list position is accepted too.
+A body (a loop's, a function's, a `cond` clause's, ...) is one form: the
+statement itself when there is one, `(do s ...)` when there are more. An
+absent optional field is `()`, never `(nil)`; a missing type annotation is
+`(type auto)`.
 
-**There are no boolean fields, by design:** a distinction in what a node *is*
-becomes a kind of its own (`'defer` / `'defer_on`, `'catch` / `'catch_return`,
-`'true` / `'false`), and a distinction in what role a child *plays* becomes a
-position (a `*rest` parameter). Where this AST spells such a distinction as a
-field, the row carries the value that field takes — `ROWS`' `when`/`sets`
-pair is the one place the two spellings meet.
+## This AST against the canonical one
 
-## Adding a node kind
+wypoc keeps its dataclass AST (one class per construct), which differs in
+places; the encoder and decoder below are where that difference lives:
 
-Add one row to `ROWS`: the AST class, the head symbol, and its fields in
-order. Both directions read the row, so there is no second place to keep in
-step. A kind whose AST shape isn't a flat list of independent fields gets an
-entry in `_ENCODERS`/`_DECODERS` instead; those are the handful listed under
-"Irregular kinds" below.
+* Statement lists become bodies, and `ExprStmt` has no node: an expression
+  in statement position is just the expression. `decode` wraps it again
+  wherever a statement is expected (`_stmt`).
+* Assignment targets (`NameTarget`/`AttrTarget`/`IndexTarget`) cross as the
+  expressions they denote: `x`, `(attr a b)`, `(index a k)`.
+* `if`/`elif`/`else` is one `cond`; a `Message` is an `apply` of a
+  `bind_msg`, and a `MessageTupleExpr` is the same with a `tuple`
+  receiver.
+* Types cross as `(type member ...)`: one member for a plain type, more for
+  a union (`TypeUnion`), and `(type auto)` for no annotation (None here).
+* Strings and numbers hold their raw token text in the AST (see
+  ast_nodes.Str/Num), so they are interpreted on the way out and re-spelled
+  on the way back in.
 
-## Where this differs from the reference implementation
+`SignalDef`, `Emit`, `ThreadSpawn` and `TaskSpawn` have no canonical shape
+until the signals and concurrency research settles one, so they can't
+cross (they stay wypoc's own, see `_CANNOT_CROSS`).
 
-That implementation's AST is one uniform node type with `a`/`b`/`c`/`d` child
-slots, so its table names slots. This one has a dataclass per construct, so
-the table names fields — same table, spelled against a different tree. Three
-consequences worth knowing:
-
-* **`nil` and `this` are ordinary names here.** wypoc has no `Nil` node (`nil`
-  is a builtin binding) and spells `this` as its own `ThisRef` node. Both
-  cross as the kinds the format defines (`'nil`, and `'name` with the name
-  `this`), so a decorator sees the format's shape either way.
-* **Types are carried, and lossily.** A type crosses as a bare-name node
-  (`$['int]`) or, qualified, `$['qualified_name, seg, ..., name]` - the same
-  shapes the reference parser's `qualified_name` action produces (see
-  `_encode_type`/`decode_type`). This grammar's `ann_type` (wyrm.gram) keeps
-  only the first arm of a `->` return-type union, so a multi-type result
-  cannot cross. Nothing downstream enforces types, here or there.
-* **No source positions.** A node carries no line or token range, so a tree
-  rebuilt from an s-expression reports at the decorator that produced it. The
-  AST's `pos` fields come back `None`, which every consumer already tolerates
-  (see ast_nodes' module docstring).
+No source positions cross either way. A tree rebuilt from an s-expression
+reports at the decorator that produced it; its `pos` fields are None, which
+every consumer already tolerates (see ast_nodes' module docstring).
 """
 from wypoc import ast_nodes as ast
 from wypoc.wyrm_builtins import NIL, Pair, Symbol, quote_string
 
-# The operators a `'binop`/`'unop` may name. The one place a wyrm operator is
-# spelled as a symbol; `UnaryOp` names its operators (`neg`, `pos`, `inv`)
-# rather than spelling them, so that arm needs the two spellings mapped (see
-# `_UNOP_TO_OP`).
-OPERATORS = (
-    "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>",
-    "==", "!=", "<", ">", "<=", ">=", "<=>",
+# Binary operator heads, as the grammar spells them (`BinOp.op`).
+BINARY = (
+    "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "^", "|",
+    "<", ">", "<=", ">=", "==", "!=", "<=>", "in",
 )
 
-_UNOP_TO_OP = {"neg": "-", "pos": "+", "inv": "~"}
-_OP_TO_UNOP = {op: name for name, op in _UNOP_TO_OP.items()}
+# Unary heads: `UnaryOp.op` -> the head it crosses as.
+_UNARY = {"neg": "neg", "pos": "pos", "inv": "~", "not": "not"}
+_UNARY_BACK = {head: op for op, head in _UNARY.items()}
 
 
 class SexprError(Exception):
@@ -76,138 +75,12 @@ class SexprError(Exception):
     and the line (see wyrm_eval_parse_tree.expand_decorated)."""
 
 
-# Constructs with no kind in the format, named in the diagnostic rather than
-# reported as an unrecognised class. Ordered as doc/sexpr-spec.md's "Not in
-# the format yet" lists them.
 _CANNOT_CROSS = {
-    ast.CoDef: "a coroutine cannot cross into a decorator yet",
-    ast.Yield: "a yield cannot cross into a decorator yet",
-    ast.ClassDef: "a class cannot cross into a decorator yet",
-    ast.SlotDef: "a slot cannot cross into a decorator yet",
-    ast.SignalDef: "a signal cannot cross into a decorator yet",
-    ast.Emit: "an emit cannot cross into a decorator yet",
-    ast.FromImport: "a from-import cannot cross into a decorator yet",
-    ast.SuperCall: "super() cannot cross into a decorator yet",
-    ast.Lambda: "an anonymous fn cannot cross into a decorator yet",
-    ast.Char: "a character literal cannot cross into a decorator yet",
-    ast.Defined: "defined() cannot cross into a decorator yet",
-    ast.MessageTupleExpr: "a tuple message send cannot cross into a decorator yet",
-    ast.SetIfUnset: "'?=' as an expression cannot cross into a decorator yet",
-    ast.AstRef: "a $ast reference cannot cross into a decorator yet",
-    ast.Kwarg: "a keyword argument cannot cross into a decorator yet",
-    ast.SpreadPos: "a spread argument cannot cross into a decorator yet",
-    ast.SpreadKw: "a spread argument cannot cross into a decorator yet",
+    ast.SignalDef: "a signal has no canonical tree yet",
+    ast.Emit: "an emit has no canonical tree yet",
+    ast.ThreadSpawn: "a thread spawn has no canonical tree yet",
+    ast.TaskSpawn: "a task spawn has no canonical tree yet",
 }
-
-# ---------------------------------------------------------------------
-# Field kinds
-#
-# A field names an AST attribute and how it is spelled on the wire. Each is
-# a pair of pure functions, so a row reads the same in both directions.
-# ---------------------------------------------------------------------
-
-SYM = "sym"            # a str attribute      -> symbol
-TEXT = "text"          # a str attribute      -> str
-NODE = "node"          # a child node         -> node, or nil when absent
-NODES = "nodes"        # a list of children   -> list of nodes
-NAMES = "names"        # a list of str        -> list of 'name nodes
-TYPES = "types"        # a list of TypeExpr   -> list of type nodes
-TYPE = "type"          # an optional TypeExpr -> type node, or nil when absent
-RESERVED = "reserved"  # always nil, and only nil is accepted back
-
-
-class F:
-    """One field of one row: the AST attribute, and its wire spelling."""
-
-    __slots__ = ("attr", "kind")
-
-    def __init__(self, attr: str, kind: str):
-        self.attr = attr
-        self.kind = kind
-
-
-class Row:
-    """One node kind. `when` selects among rows sharing an AST class, and
-    `sets` is what that same distinction assigns back on the way in - the
-    format has no flags, so a flag in the AST becomes two rows here.
-    `defaults` supplies the constructor arguments the format doesn't carry."""
-
-    __slots__ = ("cls", "kind", "fields", "when", "sets", "defaults")
-
-    def __init__(self, cls, kind, *fields, when=None, sets=None, defaults=None):
-        self.cls = cls
-        self.kind = kind
-        self.fields = fields
-        self.when = when
-        self.sets = sets or {}
-        self.defaults = defaults or {}
-
-
-ROWS = (
-    # --- literals and names ------------------------------------------------
-    # `'int`/`'float`/`'str` are irregular: those nodes hold raw token text
-    # (see "Strings and numbers" below), so they live in _ENCODERS/_DECODERS.
-    Row(ast.Bool, "true", when=lambda n: n.value is True, sets={"value": True}),
-    Row(ast.Bool, "false", when=lambda n: n.value is False, sets={"value": False}),
-    Row(ast.EllipsisExpr, "ellipsis"),
-    Row(ast.Symbol, "sym", F("name", SYM)),
-    Row(ast.Name, "name", F("id", SYM)),
-
-    # --- expressions -------------------------------------------------------
-    Row(ast.Array, "list", F("items", NODES)),
-    Row(ast.Tuple, "tuple", F("items", NODES)),
-    Row(ast.DictEntry, "pair", F("key", NODE), F("value", NODE)),
-    Row(ast.Pair, "pairlist", F("elements", NODES)),
-    Row(ast.Dict, "dict", F("entries", NODES)),
-    Row(ast.UnaryOp, "not", F("operand", NODE),
-        when=lambda n: n.op == "not", sets={"op": "not"}),
-    Row(ast.BinOp, "and", F("left", NODE), F("right", NODE),
-        when=lambda n: n.op == "and", sets={"op": "and"}),
-    Row(ast.BinOp, "or", F("left", NODE), F("right", NODE),
-        when=lambda n: n.op == "or", sets={"op": "or"}),
-    Row(ast.Call, "call", F("func", NODE), F("args", NODES)),
-    Row(ast.Attr, "attr", F("obj", NODE), F("name", SYM)),
-    Row(ast.Index, "index", F("obj", NODE), F("index", NODE)),
-    Row(ast.Message, "msg", F("obj", NODE), F("name", SYM), F("args", NODES)),
-    Row(ast.Scope, "mod_get", F("obj", NODE), F("name", SYM)),
-    Row(ast.TypeCheck, "is", F("value", NODE), F("types", TYPES)),
-    Row(ast.Do, "do", F("body", NODES)),
-    Row(ast.Try, "try", F("value", NODE)),
-
-    # --- statements --------------------------------------------------------
-    Row(ast.ExprStmt, "expr_stmt", F("value", NODE)),
-    Row(ast.StaticDecl, "static", F("name", SYM), F("default", NODE),
-        defaults={"type": None}),
-    Row(ast.While, "while", F("cond", NODE), F("body", NODES)),
-    # `'break` carries a value in the format; `break` takes none in this
-    # grammar (see wyrm.gram's break_stmt), so the position is always nil.
-    Row(ast.Break, "break", F("value", RESERVED)),
-    Row(ast.Continue, "continue"),
-    Row(ast.Return, "return", F("value", NODE)),
-    Row(ast.Pass, "pass"),
-    Row(ast.WithBlock, "with", F("bindings", NODES)),
-
-    # --- definitions -------------------------------------------------------
-    Row(ast.Param, "param", F("name", SYM), F("type", TYPE),
-        defaults={"default": None}),
-
-    # --- decorators ----------------------------------------------------
-    # An unexpanded decorator application, crossing raw - this is what makes
-    # `macroexpand()` possible: an outer decorator's `this` can itself be a
-    # `'decorated` node (see wyrm_eval_parse_tree.expand_decorated, which no
-    # longer pre-expands a stacked decorator's inner before boxing it).
-    # `has_parens`/positions are decoded with sensible defaults since the
-    # format has no field for them - they only ever affected parsing.
-    Row(ast.Decorator, "decorator", F("name", SYM), F("args", NODES),
-        defaults={"has_parens": True}),
-    Row(ast.Decorated, "decorated", F("decorator", NODE), F("inner", NODE)),
-)
-
-_ROWS_BY_CLASS: dict = {}
-for _row in ROWS:
-    _ROWS_BY_CLASS.setdefault(_row.cls, []).append(_row)
-
-_ROWS_BY_KIND = {_row.kind: _row for _row in ROWS}
 
 
 # ---------------------------------------------------------------------
@@ -223,17 +96,20 @@ def _pairs(items) -> object:
 
 
 def node(kind: str, *fields) -> object:
-    """`$['kind, field, ...]` - one s-expression node."""
+    """`(kind field ...)` - one node."""
     return _pairs([Symbol(kind)] + list(fields))
 
 
+def _is_nil(value) -> bool:
+    return value is NIL or value is None
+
+
 def _as_list(value, what: str) -> list:
-    """A child-list field's elements. Both a list and a pair list are
-    accepted coming back in (the encoder always produces a list), since a
-    decorator building one out of `cons` has no reason to know which."""
-    if isinstance(value, list):
+    """A proper list's elements. A Python list is accepted too, since a
+    decorator building a tree has no reason to know which it made."""
+    if isinstance(value, (list, tuple)):
         return list(value)
-    if value is NIL or value is None:
+    if _is_nil(value):
         return []
     if isinstance(value, Pair):
         out = []
@@ -241,14 +117,14 @@ def _as_list(value, what: str) -> list:
         while isinstance(cursor, Pair):
             out.append(cursor.car)
             cursor = cursor.cdr
-        if cursor is not NIL and cursor is not None:
+        if not _is_nil(cursor):
             raise SexprError(f"{what} must be a proper list")
         return out
     raise SexprError(f"{what} must be a list, not a {_type_name(value)}")
 
 
 def _type_name(value) -> str:
-    if value is None or value is NIL:
+    if _is_nil(value):
         return "nil"
     if isinstance(value, bool):
         return "bool"
@@ -257,26 +133,18 @@ def _type_name(value) -> str:
     return type(value).__name__
 
 
-def _fields_of(sexpr) -> list:
-    """A node's kind symbol and its fields, checked only as far as "this is
-    a `$[...]` list whose head is a symbol"."""
-    if not isinstance(sexpr, Pair):
-        raise SexprError(f"a node must be a $[...] list, not a {_type_name(sexpr)}")
-    items = _as_list(sexpr, "a node")
-    if not isinstance(items[0], Symbol):
-        raise SexprError(
-            f"a node's head must be a kind symbol, not a {_type_name(items[0])}"
-        )
-    return items[0].name, items[1:]
+def _sym(value, what: str) -> str:
+    if not isinstance(value, Symbol):
+        raise SexprError(f"{what} must be a symbol, not a {_type_name(value)}")
+    return value.name
+
+
+def _opt_sym(value, what: str):
+    return None if _is_nil(value) else _sym(value, what)
 
 
 # ---------------------------------------------------------------------
 # Strings and numbers
-#
-# Both hold raw token text in the AST (see ast_nodes.Str/Num), because the
-# tokenizer hands the parser the source characters and the evaluator is what
-# interprets them. Crossing therefore means interpreting on the way out and
-# re-spelling on the way back in.
 # ---------------------------------------------------------------------
 
 def spell_number(value) -> str:
@@ -287,49 +155,15 @@ def spell_number(value) -> str:
     return str(value) if isinstance(value, int) else repr(value)
 
 
-# ---------------------------------------------------------------------
-# Targets
-#
-# An assignment's left-hand side is its own small family of nodes here
-# (NameTarget/AttrTarget/IndexTarget), while the format has only the
-# expression kinds - `x`, `a.b`, `a[0]`. The two conversions below are the
-# whole of that difference.
-# ---------------------------------------------------------------------
+def _spell_char(codepoint: int) -> str:
+    """A codepoint as the text of a Char node (see eval_char_literal)."""
+    from wypoc.wyrm_eval_parse_tree import CHAR_NAMES
 
-def target_to_expr(target):
-    if isinstance(target, ast.NameTarget):
-        return ast.Name(target.name)
-    if isinstance(target, ast.AttrTarget):
-        base = (ast.ThisRef() if isinstance(target.base, ast.ThisRef)
-                else ast.Name(target.base))
-        for name in target.attrs:
-            base = ast.Attr(base, name)
-        return base
-    if isinstance(target, ast.IndexTarget):
-        return ast.Index(target_to_expr(target.base), target.index)
-    raise SexprError(f"{type(target).__name__} is not an assignable target")
-
-
-def expr_to_target(expr):
-    if isinstance(expr, ast.Name):
-        return ast.NameTarget(expr.id)
-    if isinstance(expr, ast.Index):
-        return ast.IndexTarget(expr_to_target(expr.obj), expr.index)
-    if isinstance(expr, ast.Attr):
-        attrs = []
-        cursor = expr
-        while isinstance(cursor, ast.Attr):
-            attrs.append(cursor.name)
-            cursor = cursor.obj
-        attrs.reverse()
-        if isinstance(cursor, ast.ThisRef):
-            return ast.AttrTarget(ast.ThisRef(), attrs)
-        if isinstance(cursor, ast.Name):
-            return ast.AttrTarget(cursor.id, attrs)
-        raise SexprError(
-            "an assignment target's attribute chain must start at a name or `this`"
-        )
-    raise SexprError(f"a {_type_name(expr)} is not an assignable target")
+    ch = chr(codepoint)
+    for name, value in CHAR_NAMES.items():
+        if value == ch:
+            return "\\" + name
+    return "\\" + ch
 
 
 # ---------------------------------------------------------------------
@@ -337,52 +171,52 @@ def expr_to_target(expr):
 # ---------------------------------------------------------------------
 
 def encode(tree):
-    """The canonical s-expression of one AST node."""
+    """The canonical tree of one AST node (or of a Program, `(module ...)`).
+    A statement list's element crosses exactly as `encode` gives it; a
+    body is `encode_body`."""
     if tree is None:
         return NIL
     encoder = _ENCODERS.get(type(tree))
-    if encoder is not None:
-        return encoder(tree)
-    message = _CANNOT_CROSS.get(type(tree))
-    if message is not None:
-        raise SexprError(message)
-    rows = _ROWS_BY_CLASS.get(type(tree))
-    if rows is None:
-        raise SexprError(f"{type(tree).__name__} has no s-expression kind")
-    for row in rows:
-        if row.when is None or row.when(tree):
-            return _encode_row(row, tree)
-    raise SexprError(
-        f"{type(tree).__name__} has no s-expression kind for this form"
-    )
+    if encoder is None:
+        message = _CANNOT_CROSS.get(type(tree))
+        raise SexprError(message or f"{type(tree).__name__} has no canonical tree")
+    return encoder(tree)
 
 
-def _encode_row(row: Row, tree) -> object:
-    fields = [Symbol(row.kind)]
-    for field in row.fields:
-        fields.append(_encode_field(field, tree))
-    return _pairs(fields)
+def encode_body(stmts) -> object:
+    """A body (R2): the one statement, or `(do s ...)`. An empty body, which
+    only an empty `{}` can spell, is `(pass)`."""
+    stmts = list(stmts or ())
+    if not stmts:
+        return node("pass")
+    if len(stmts) == 1:
+        return encode(stmts[0])
+    return node("do", *[encode(s) for s in stmts])
 
 
-def _encode_field(field: F, tree):
-    if field.kind is RESERVED:
-        return NIL
-    value = getattr(tree, field.attr, None)
-    if field.kind is SYM:
-        return Symbol(value) if value is not None else NIL
-    if field.kind is TEXT:
-        return value
-    if field.kind is NODE:
-        return encode(value)
-    if field.kind is NODES:
-        return [encode(child) for child in (value or ())]
-    if field.kind is NAMES:
-        return [node("name", Symbol(name)) for name in (value or ())]
-    if field.kind is TYPES:
-        return [_encode_type(t) for t in (value or ())]
-    if field.kind is TYPE:
-        return NIL if value is None else _encode_type(value)
-    raise AssertionError(f"unknown field kind {field.kind!r}")
+def encode_type(type_expr) -> object:
+    """A type position: `(type auto)` when nothing was written, else
+    `(type member ...)` - a member is a bare name, or `(:: a T)` when
+    qualified."""
+    if type_expr is None:
+        return node("type", Symbol("auto"))
+    if isinstance(type_expr, ast.TypeUnion):
+        return node("type", *[_type_member(t) for t in type_expr.members])
+    if isinstance(type_expr, (list, tuple)):
+        return node("type", *[_type_member(t) for t in type_expr])
+    return node("type", _type_member(type_expr))
+
+
+def _type_member(type_expr):
+    if not isinstance(type_expr, ast.TypeExpr) or not type_expr.parts:
+        raise SexprError("a type must be a name, optionally qualified")
+    if len(type_expr.parts) == 1:
+        return Symbol(type_expr.parts[0])
+    return node("::", *[Symbol(p) for p in type_expr.parts])
+
+
+def _args(args) -> list:
+    return [encode(a) for a in args or ()]
 
 
 def _encode_num(tree: ast.Num):
@@ -398,225 +232,310 @@ def _encode_str(tree: ast.Str):
     return node("str", eval_string_literal(tree.value))
 
 
-def _encode_type(tree):
-    """A concrete type: always `$['type, X]`, the same wrapper the `$['type,
-    'auto]` no-annotation sentinel uses (see `_encode_var_type`) - `X` is a
-    bare name symbol (`$['type, 'int]`, `$['type, 'nil]`) for one
-    unqualified name, or a nested `$['qualified_name, seg, ...]` for a
-    `::`-qualified one (a single segment collapses to just that segment,
-    matching the reference implementation's own `qualified_name` parser
-    action, wy/wyrm/parser/parser.wy's `_mk_qualified_name`)."""
-    if not isinstance(tree, ast.TypeExpr) or not tree.parts:
-        raise SexprError("a type must be a name, optionally qualified")
-    if len(tree.parts) == 1:
-        return node("type", Symbol(tree.parts[0]))
-    return node("type", node("qualified_name", *[Symbol(part) for part in tree.parts]))
+def _encode_char(tree: ast.Char):
+    from wypoc.wyrm_eval_parse_tree import eval_char_literal
+
+    return node("char", eval_char_literal(tree.value))
 
 
-def _encode_var_type(type_expr):
-    """A `var`/`define` target's type position: `$['type, 'auto]` when no
-    annotation was written, the ordinary type shape otherwise - matching
-    `_mk_type_expression`'s default in the reference parser."""
-    if type_expr is None:
-        return node("type", Symbol("auto"))
-    return _encode_type(type_expr)
+def _encode_name(tree: ast.Name):
+    if tree.id == "nil":
+        return node("nil")
+    return Symbol(tree.id)
+
+
+def _flatten(tree: ast.BinOp, op: str) -> list:
+    """`a and b and c` parses as a left-leaning chain; it crosses flat."""
+    if isinstance(tree, ast.BinOp) and tree.op == op:
+        return _flatten(tree.left, op) + _flatten(tree.right, op)
+    return [tree]
 
 
 def _encode_binop(tree: ast.BinOp):
     if tree.op in ("and", "or"):
-        return _encode_row(_ROWS_BY_KIND[tree.op], tree)
-    if tree.op not in OPERATORS:
-        raise SexprError(
-            f"the {tree.op!r} operator cannot cross into a decorator yet"
-        )
-    return node("binop", Symbol(tree.op), encode(tree.left), encode(tree.right))
+        return node(tree.op, *[encode(t) for t in _flatten(tree, tree.op)])
+    if tree.op not in BINARY:
+        raise SexprError(f"the {tree.op!r} operator has no canonical tree")
+    return node(tree.op, encode(tree.left), encode(tree.right))
 
 
 def _encode_unaryop(tree: ast.UnaryOp):
-    if tree.op == "not":
-        return _encode_row(_ROWS_BY_KIND["not"], tree)
-    op = _UNOP_TO_OP.get(tree.op)
-    if op is None:
-        raise SexprError(
-            f"the unary {tree.op!r} operator cannot cross into a decorator yet"
-        )
-    return node("unop", Symbol(op), encode(tree.operand))
+    head = _UNARY.get(tree.op)
+    if head is None:
+        raise SexprError(f"the unary {tree.op!r} operator has no canonical tree")
+    return node(head, encode(tree.operand))
 
 
-def _encode_catch(tree: ast.Catch):
-    """`v catch h` and `v catch return h` are two kinds, not one carrying a
-    flag - so the handler crosses as the expression it is either way, and
-    the kind says what happens to it."""
-    if isinstance(tree.handler, ast.Return):
-        return node("catch_return", encode(tree.value), encode(tree.handler.value))
-    return node("catch", encode(tree.value), encode(tree.handler))
+def _scope_segments(tree):
+    """`a::b::c` as [a, b, c] when it bottoms out in a plain name, else
+    None (e.g. `f()::x`)."""
+    parts = []
+    cursor = tree
+    while isinstance(cursor, ast.Scope):
+        parts.append(cursor.name)
+        cursor = cursor.obj
+    if not isinstance(cursor, ast.Name):
+        return None
+    parts.append(cursor.id)
+    return list(reversed(parts))
+
+
+def _encode_scope(tree: ast.Scope):
+    segments = _scope_segments(tree)
+    if segments is None:
+        return node("::", encode(tree.obj), Symbol(tree.name))
+    return node("::", *[Symbol(s) for s in segments])
+
+
+def _selector(name: str, module):
+    """A message selector: a bare symbol, or `(:: mod name)` for wypoc's
+    module-qualified `recv ! mod::name(...)`."""
+    if module is None:
+        return Symbol(name)
+    return node("::", Symbol(module), Symbol(name))
+
+
+def _encode_message(tree: ast.Message):
+    bound = node("bind_msg", encode(tree.obj), _selector(tree.name, tree.module))
+    if tree.args is None:
+        return bound
+    return node("apply", bound, *_args(tree.args))
+
+
+def _encode_message_tuple(tree: ast.MessageTupleExpr):
+    receiver = node("tuple", *[encode(i) for i in tree.items])
+    bound = node("bind_msg", receiver, Symbol(tree.name))
+    if tree.args is None:
+        return bound
+    return node("apply", bound, *_args(tree.args))
 
 
 def _encode_if(tree: ast.If):
-    """`elif` has no kind of its own: an `elif` chain is the nested `if` it
-    means, in the else position, which is how the format's three-field `'if`
-    carries arbitrarily many branches."""
-    orelse = list(tree.orelse or ())
-    for clause in reversed(tree.elifs or ()):
-        orelse = [ast.If(clause.cond, clause.body, [], orelse or None)]
-    return node("if", encode(tree.cond),
-                [encode(s) for s in tree.body],
-                [encode(s) for s in orelse])
+    clauses = [_pairs([encode(tree.cond), encode_body(tree.body)])]
+    for clause in tree.elifs or ():
+        clauses.append(_pairs([encode(clause.cond), encode_body(clause.body)]))
+    if tree.orelse is not None:
+        clauses.append(node("else", encode_body(tree.orelse)))
+    return node("cond", *clauses)
 
 
 def _encode_for(tree: ast.For):
-    if tree.orelse is not None:
-        raise SexprError("a for/else cannot cross into a decorator yet")
-    return node("for", Symbol(tree.var), encode(tree.iter),
-                [encode(s) for s in tree.body])
+    orelse = NIL if tree.orelse is None else encode_body(tree.orelse)
+    return node("for", Symbol(tree.var), encode(tree.iter), orelse, encode_body(tree.body))
+
+
+def _values(values):
+    """An assignment's or declaration's right-hand side: one expression,
+    a `tuple` of several, or () for none."""
+    if not values:
+        return NIL
+    if len(values) == 1:
+        return encode(values[0])
+    return node("tuple", *[encode(v) for v in values])
 
 
 def _encode_var_decl(tree: ast.VarDecl):
-    """`'define, name, type, value` for one target - the reference
-    implementation's `_build_define` (wy/wyrm/parser/parser.wy). Several
-    targets at once (`var a, b = 1, 2`) becomes `'define_values`: a list of
-    `[name, type]` pairs plus the single init expression, wrapped in a
-    `'tuple` node when there's more than one value - `_build_define` always
-    hands `'define_values` one init expression, never one per target."""
     if len(tree.targets) == 1:
         target = tree.targets[0]
-        value = tree.values[0] if tree.values else None
-        return node("define", Symbol(target.name), _encode_var_type(target.type),
-                    encode(value))
-    pairs = [[Symbol(target.name), _encode_var_type(target.type)]
-             for target in tree.targets]
-    values = tree.values
-    if not values:
-        value_node = NIL
-    elif len(values) == 1:
-        value_node = encode(values[0])
-    else:
-        value_node = encode(ast.Tuple(values))
-    return node("define_values", pairs, value_node)
+        return node("define", Symbol(target.name), encode_type(target.type),
+                    _values(tree.values))
+    targets = [_pairs([Symbol(t.name), encode_type(t.type)]) for t in tree.targets]
+    return node("define_values", _pairs(targets), _values(tree.values))
 
 
-def _encode_assign_target(target):
-    """An assignment target: a bare symbol for a plain name, or the
-    expression it means (`$['attr, ...]`/`$['index, ...]`) otherwise -
-    `sym | pair` per the reference implementation's `n_set`/`n_set_values`
-    (wy/wyrm/ast.wy)."""
+def target_to_expr(target):
+    """An assignment target as the expression it denotes."""
     if isinstance(target, ast.NameTarget):
-        return Symbol(target.name)
-    return encode(target_to_expr(target))
+        return ast.Name(target.name)
+    if isinstance(target, ast.AttrTarget):
+        base = ast.Name(target.base)
+        for name in target.attrs:
+            base = ast.Attr(base, name)
+        return base
+    if isinstance(target, ast.IndexTarget):
+        return ast.Index(target_to_expr(target.base), target.index)
+    raise SexprError(f"{type(target).__name__} is not an assignable target")
+
+
+def expr_to_target(expr):
+    """The inverse of target_to_expr."""
+    if isinstance(expr, ast.Name):
+        return ast.NameTarget(expr.id)
+    if isinstance(expr, ast.Index):
+        return ast.IndexTarget(expr_to_target(expr.obj), expr.index)
+    if isinstance(expr, ast.Attr):
+        attrs = []
+        cursor = expr
+        while isinstance(cursor, ast.Attr):
+            attrs.append(cursor.name)
+            cursor = cursor.obj
+        attrs.reverse()
+        if isinstance(cursor, ast.Name):
+            return ast.AttrTarget(cursor.id, attrs)
+        raise SexprError("an assignment target's attribute chain must start at a name")
+    raise SexprError(f"a {type(expr).__name__} is not an assignable target")
 
 
 def _encode_assign(tree: ast.Assign):
-    """`=` -> `'set` (one target) or `'set_values` (more than one, the
-    value wrapped in a synthesized `'tuple` node), `?=` -> `'if_set` (one
-    target only) - matching the reference parser's `$_mk_assign` and
-    `n_set`/`n_set_values`/`n_if_set` (wy/wyrm/ast.wy)."""
-    if len(tree.targets) != len(tree.values):
-        raise SexprError("a multiple assignment cannot cross into a decorator yet")
+    targets = [encode(target_to_expr(t)) for t in tree.targets]
     if tree.op == "?=":
         if len(tree.targets) != 1:
-            raise SexprError("'?=' only supports a single assignment target")
-        return node("if_set", _encode_assign_target(tree.targets[0]),
-                    encode(tree.values[0]))
-    if len(tree.targets) == 1:
-        return node("set", _encode_assign_target(tree.targets[0]),
-                    encode(tree.values[0]))
-    targets = [_encode_assign_target(t) for t in tree.targets]
-    value_node = (encode(tree.values[0]) if len(tree.values) == 1
-                  else encode(ast.Tuple(tree.values)))
-    return node("set_values", targets, value_node)
+            raise SexprError("'?=' has one target")
+        return node("if_set", targets[0], _values(tree.values))
+    if len(targets) == 1:
+        return node("set", targets[0], _values(tree.values))
+    return node("set_values", _pairs(targets), _values(tree.values))
 
 
-def _encode_with_simple(tree: ast.WithSimple):
-    """A single `with x = 1` is the one-binding case of the block form, so
-    both cross as `'with` over a list of `'decl`s."""
-    return node("with", [_encode_with_binding(tree)])
+def _encode_params(params) -> object:
+    out = []
+    for p in params:
+        if isinstance(p, ast.VarPositional):
+            out.append(_pairs([Symbol("*"), Symbol(p.name), encode_type(None)]))
+        elif isinstance(p, ast.VarKeyword):
+            out.append(_pairs([Symbol("**"), Symbol(p.name), encode_type(None)]))
+        else:
+            out.append(_pairs([Symbol(p.name), encode_type(p.type), encode(p.default)]))
+    return _pairs(out)
 
 
-def _encode_with_binding(binding):
-    return node("decl", Symbol(binding.name), encode(binding.value))
-
-
-def _encode_defer(tree: ast.Defer):
-    body = [encode(s) for s in tree.body]
-    if not tree.on_error:
-        return node("defer", body)
-    # `defer on error` is the only guard this grammar spells, so the type
-    # list it crosses with has exactly one entry. The format keeps the list
-    # because the design allows for more.
-    return node("defer_on", body, [_encode_type(ast.TypeExpr(["error"]))])
+def _dispatch(class_target):
+    if class_target is None:
+        return NIL
+    return node("dispatch", *[encode_type(ast.TypeExpr(n.split("::"))) for n in class_target])
 
 
 def _encode_fn(tree: ast.FnDef):
-    """`'fn`: name, result types, `*rest`, `**kwargs`, parameters, dispatch
-    types, body. The rest parameter leaves the parameter list on the way out
-    and rejoins it, last, on the way back - which is what retires the
-    is-rest flag the format used to carry."""
-    params, rest = [], NIL
-    for param in tree.params:
-        if isinstance(param, ast.VarPositional):
-            rest = node("param", Symbol(param.name), NIL)
-        elif isinstance(param, ast.VarKeyword):
-            raise SexprError(
-                "**kwargs cannot cross into a decorator yet "
-                "(the format reserves the position, and it is always nil)"
-            )
-        else:
-            params.append(encode(param))
-    results = [_encode_type(tree.ret)] if tree.ret is not None else []
-    dispatch = [node("name", Symbol(n)) for n in (tree.class_target or ())]
-    return node("fn", Symbol(tree.name), results, rest, NIL, params, dispatch,
-                [encode(s) for s in tree.body])
+    return node("fn_def", Symbol(tree.name), _dispatch(tree.class_target),
+                _encode_params(tree.params), encode_type(tree.ret), encode_body(tree.body))
+
+
+def _encode_co(tree: ast.CoDef):
+    return node("co_def", Symbol(tree.name), _dispatch(tree.class_target),
+                _encode_params(tree.params), encode_type(tree.intype),
+                encode_type(tree.ret), encode_body(tree.body))
+
+
+def _encode_lambda(tree: ast.Lambda):
+    return node("lambda", _encode_params(tree.params), encode_type(tree.ret),
+                encode_body(tree.body))
+
+
+def _encode_colambda(tree: ast.CoLambda):
+    return node("co_lambda", _encode_params(tree.params), encode_type(tree.intype),
+                encode_type(tree.ret), encode_body(tree.body))
+
+
+def _path(segments):
+    if len(segments) == 1:
+        return Symbol(segments[0])
+    return node("::", *[Symbol(s) for s in segments])
 
 
 def _encode_import(tree: ast.Import):
-    """`'import`: path, then the four ways an import can narrow what it
-    binds (alias / items / wildcard / except_names - mutually exclusive per
-    ast_nodes.Import's docstring, so at most one of the three positions past
-    `static` is ever non-nil) plus `static`. Booleans as plain fields is the
-    one deliberate exception to "no boolean fields" in this table - `static`
-    and `wildcard` don't correspond to distinct node *shapes` the way every
-    other flag in this format does, so splitting them into kinds would only
-    multiply the rows without adding a distinction worth making."""
-    path = [node("name", Symbol(p)) for p in tree.path]
-    alias = node("name", Symbol(tree.alias)) if tree.alias else NIL
-    items = ([node("import_item", Symbol(i.name),
-                    node("name", Symbol(i.alias)) if i.alias else NIL)
-              for i in tree.items] if tree.items else NIL)
-    except_names = ([node("name", Symbol(n)) for n in tree.except_names]
-                     if tree.except_names else NIL)
-    return node("import", path, node("true") if tree.static else node("false"),
-                alias, items, node("true") if tree.wildcard else node("false"),
-                except_names)
+    spec = []
+    if tree.alias:
+        spec.append(node("as", Symbol(tree.alias)))
+    elif tree.items:
+        spec.append(node("items", *[
+            node("item", Symbol(i.name), Symbol(i.alias) if i.alias else NIL)
+            for i in tree.items]))
+    elif tree.wildcard:
+        spec.append(node("all", *[Symbol(n) for n in tree.except_names or ()]))
+    return node("import_static" if tree.static else "import", _path(tree.path), *spec)
 
 
-def _encode_program(tree: ast.Program):
-    """`'module` splices its statements directly as siblings of the head
-    symbol (`$['module, stmt, stmt, ...]`) rather than carrying them in a
-    single list-valued field, matching the reference parser's `_mk_module`
-    (`cons('module, expr)` over the already-flat statement list)."""
-    return _pairs([Symbol("module")] + [encode(s) for s in tree.body])
+def _encode_defer(tree: ast.Defer):
+    if tree.on is None:
+        return node("defer", encode_body(tree.body))
+    return node("defer_on", encode_type(tree.on), encode_body(tree.body))
+
+
+def _encode_decorated(tree: ast.Decorated):
+    return node("decorate", Symbol(tree.decorator.name), encode(tree.inner),
+                *_args(tree.decorator.args))
+
+
+def _encode_slot(tree: ast.SlotDef):
+    body = NIL if tree.body is None else encode_body(tree.body)
+    return node("slot_def", Symbol(tree.name), encode_type(tree.type), encode(tree.default), body)
+
+
+def _encode_yield(tree: ast.Yield):
+    if tree.from_:
+        return node("yield_from", encode(tree.value))
+    return node("yield", *([] if tree.value is None else [encode(tree.value)]))
+
+
+def _encode_optional_value(kind):
+    def encoder(tree):
+        value = getattr(tree, "value", None)
+        return node(kind, *([] if value is None else [encode(value)]))
+    return encoder
 
 
 _ENCODERS = {
+    ast.Program: lambda t: node("module", *[encode(s) for s in t.body]),
+    ast.ExprStmt: lambda t: encode(t.value),
+    # literals and names
     ast.Num: _encode_num,
     ast.Str: _encode_str,
+    ast.Char: _encode_char,
+    ast.Bool: lambda t: node("true" if t.value else "false"),
+    ast.Symbol: lambda t: node("sym", Symbol(t.name)),
+    ast.EllipsisExpr: lambda t: node("ellipsis"),
+    ast.Name: _encode_name,
+    # collections
+    ast.Tuple: lambda t: node("tuple", *[encode(i) for i in t.items]),
+    ast.Array: lambda t: node("array", *[encode(i) for i in t.items]),
+    ast.Pair: lambda t: node("list", *[encode(i) for i in t.elements]),
+    ast.Dict: lambda t: node("dict", *[_pairs([encode(e.key), encode(e.value)])
+                                       for e in t.entries]),
+    # operators
     ast.BinOp: _encode_binop,
     ast.UnaryOp: _encode_unaryop,
-    ast.Catch: _encode_catch,
+    ast.TypeCheck: lambda t: node("is", encode(t.value), encode_type(t.types)),
+    # application, paths
+    ast.Call: lambda t: node("apply", encode(t.func), *_args(t.args)),
+    ast.Kwarg: lambda t: node("kwarg", Symbol(t.name), encode(t.value)),
+    ast.SpreadPos: lambda t: node("spread", encode(t.value)),
+    ast.SpreadKw: lambda t: node("spread_kw", encode(t.value)),
+    ast.Message: _encode_message,
+    ast.MessageTupleExpr: _encode_message_tuple,
+    ast.Attr: lambda t: node("attr", encode(t.obj), Symbol(t.name)),
+    ast.Index: lambda t: node("index", encode(t.obj), encode(t.index)),
+    ast.Scope: _encode_scope,
+    # control
+    ast.Do: lambda t: node("do", *[encode(s) for s in t.body] or [node("pass")]),
     ast.If: _encode_if,
+    ast.While: lambda t: node("while", encode(t.cond), encode_body(t.body)),
     ast.For: _encode_for,
+    ast.Break: _encode_optional_value("break"),
+    ast.Continue: lambda t: node("continue"),
+    ast.Pass: lambda t: node("pass"),
+    ast.Return: _encode_optional_value("return"),
+    ast.Yield: _encode_yield,
+    ast.Try: lambda t: node("try", encode(t.value)),
+    ast.Catch: lambda t: node("catch", encode(t.value), encode(t.handler)),
+    ast.Defer: _encode_defer,
+    # bindings
     ast.VarDecl: _encode_var_decl,
     ast.Assign: _encode_assign,
-    ast.WithSimple: _encode_with_simple,
-    ast.WithBinding: _encode_with_binding,
-    ast.Defer: _encode_defer,
+    ast.SetIfUnset: lambda t: node("if_set", encode(t.target), encode(t.value)),
+    ast.StaticDecl: lambda t: node("static", Symbol(t.name), encode_type(t.type),
+                                   encode(t.default)),
+    # definitions
     ast.FnDef: _encode_fn,
+    ast.CoDef: _encode_co,
+    ast.Lambda: _encode_lambda,
+    ast.CoLambda: _encode_colambda,
+    ast.ClassDef: lambda t: node("class_def", Symbol(t.name), encode(t.base),
+                                 encode_body(t.body)),
+    ast.ClassExpr: lambda t: node("class_expr", encode(t.base), encode_body(t.body)),
+    ast.SlotDef: _encode_slot,
     ast.Import: _encode_import,
-    ast.TypeExpr: _encode_type,
-    ast.Program: _encode_program,
-    ast.ThisRef: lambda tree: node("name", Symbol("this")),
-    ast.Name: lambda tree: (node("nil") if tree.id == "nil"
-                            else node("name", Symbol(tree.id))),
+    ast.Decorated: _encode_decorated,
+    ast.Annotate: lambda t: node("annotate", Symbol(t.key), encode(t.value), encode(t.target)),
 }
 
 
@@ -624,113 +543,84 @@ _ENCODERS = {
 # Decoding
 # ---------------------------------------------------------------------
 
+# What may stand directly in a statement list. Anything else decoded in a
+# statement position is an expression, wrapped in ExprStmt.
+STATEMENT_NODES = (
+    ast.ExprStmt, ast.VarDecl, ast.Assign, ast.StaticDecl, ast.If, ast.While,
+    ast.For, ast.Break, ast.Continue, ast.Return, ast.Pass, ast.Yield,
+    ast.Defer, ast.FnDef, ast.CoDef, ast.ClassDef, ast.SlotDef, ast.Import,
+    ast.SignalDef, ast.Emit,
+)
+
+
+def is_statement(tree) -> bool:
+    """Whether `tree` stands in a statement list as itself. A decoration
+    or annotation is one when what it wraps is."""
+    while isinstance(tree, (ast.Decorated, ast.Annotate)):
+        tree = tree.inner if isinstance(tree, ast.Decorated) else tree.target
+    return isinstance(tree, STATEMENT_NODES)
+
+
 def decode(sexpr):
-    """One AST node from its canonical s-expression. Raises `SexprError`
-    naming the mistake - the kind, or the field that was missing or of the
-    wrong shape."""
-    kind, fields = _fields_of(sexpr)
+    """One AST node from its canonical tree: a Program for `(module ...)`,
+    otherwise a statement or an expression node as the head says. Raises
+    `SexprError` naming the mistake - the kind, or the field that was
+    missing or of the wrong shape."""
+    return _any(sexpr)
+
+
+def decode_stmt(sexpr):
+    """`sexpr` in a statement position: an expression comes back wrapped in
+    ExprStmt."""
+    return _stmt(sexpr)
+
+
+def decode_body(sexpr) -> list:
+    """A body as a statement list: `(do s ...)` is its statements, any other
+    form is one statement."""
+    if isinstance(sexpr, Pair) and sexpr.car == Symbol("do"):
+        return [_stmt(s) for s in _as_list(sexpr.cdr, "'do's statements")]
+    return [_stmt(sexpr)]
+
+
+def _stmt(sexpr):
+    tree = _any(sexpr)
+    if is_statement(tree):
+        return tree
+    return ast.ExprStmt(tree)
+
+
+def _expr(sexpr):
+    """`sexpr` in an expression position. `if_set` is the one head with a
+    statement form (Assign) and an expression form (SetIfUnset)."""
+    if isinstance(sexpr, Pair) and sexpr.car == Symbol("if_set"):
+        target, value = _expect(_as_list(sexpr.cdr, "'if_set"), 2, "if_set")
+        return ast.SetIfUnset(_expr(target), _expr(value))
+    return _any(sexpr)
+
+
+def _opt_expr(sexpr):
+    return None if _is_nil(sexpr) else _expr(sexpr)
+
+
+def _any(sexpr):
+    if isinstance(sexpr, Symbol):
+        return ast.Name(sexpr.name)
+    if not isinstance(sexpr, Pair):
+        raise SexprError(f"a node must be a symbol or a list, not a {_type_name(sexpr)}")
+    items = _as_list(sexpr, "a node")
+    head = items[0]
+    if not isinstance(head, Symbol):
+        raise SexprError(f"a node's head must be a symbol, not a {_type_name(head)}")
+    kind = head.name
+    fields = items[1:]
+    if kind in BINARY:
+        left, right = _expect(fields, 2, kind)
+        return ast.BinOp(kind, _expr(left), _expr(right))
     decoder = _DECODERS.get(kind)
-    if decoder is not None:
-        return decoder(kind, fields)
-    row = _ROWS_BY_KIND.get(kind)
-    if row is None:
+    if decoder is None:
         raise SexprError(f"'{kind} is not a node kind")
-    return _decode_row(row, kind, fields)
-
-
-def _decode_row(row: Row, kind: str, fields: list):
-    if len(fields) != len(row.fields):
-        raise SexprError(
-            f"'{kind} takes {len(row.fields)} field(s), not {len(fields)}"
-        )
-    kwargs = dict(row.defaults)
-    kwargs.update(row.sets)
-    for field, value in zip(row.fields, fields):
-        if field.kind is RESERVED:
-            if value is not NIL and value is not None:
-                raise SexprError(f"'{kind}'s reserved field must be nil")
-            continue
-        kwargs[field.attr] = _decode_field(field, value, kind)
-    return row.cls(**kwargs)
-
-
-def _decode_field(field: F, value, kind: str):
-    if field.kind is SYM:
-        if value is NIL or value is None:
-            return None
-        if not isinstance(value, Symbol):
-            raise SexprError(
-                f"'{kind}'s {field.attr} must be a symbol, not a {_type_name(value)}"
-            )
-        return value.name
-    if field.kind is TEXT:
-        if not isinstance(value, str) or isinstance(value, Symbol):
-            raise SexprError(
-                f"'{kind}'s {field.attr} must be a str, not a {_type_name(value)}"
-            )
-        return value
-    if field.kind is NODE:
-        return None if value is NIL or value is None else decode(value)
-    if field.kind is NODES:
-        return [decode(child) for child in _as_list(value, f"'{kind}'s {field.attr}")]
-    if field.kind is NAMES:
-        return [_decode_dispatch_name(child)
-                for child in _as_list(value, f"'{kind}'s {field.attr}")]
-    if field.kind is TYPES:
-        return [decode_type(child)
-                for child in _as_list(value, f"'{kind}'s {field.attr}")]
-    if field.kind is TYPE:
-        return None if value is NIL or value is None else decode_type(value)
-    raise AssertionError(f"unknown field kind {field.kind!r}")
-
-
-def _decode_dispatch_name(sexpr) -> str:
-    """A dispatch type in a `'fn`'s signature: a `'name` node, per
-    doc/sexpr-spec.md's "entries are `'name` nodes"."""
-    kind, fields = _fields_of(sexpr)
-    if kind != "name" or len(fields) != 1 or not isinstance(fields[0], Symbol):
-        raise SexprError("a dispatch type must be a $['name, 'Cls] node")
-    return fields[0].name
-
-
-def decode_type(sexpr) -> ast.TypeExpr:
-    """`$['type, X]` back into this AST's `TypeExpr` - the counterpart of
-    `_encode_type`. `X` is a bare name symbol for one unqualified name, or a
-    nested `'qualified_name` for a `::`-qualified one. Never sees `X ==
-    'auto`: that sentinel ("no annotation was written") is only valid in a
-    `var`/`define` target's type position, decoded by `_decode_var_type`
-    instead."""
-    kind, fields = _fields_of(sexpr)
-    if kind != "type":
-        raise SexprError(f"'{kind} is not a type")
-    if len(fields) != 1:
-        raise SexprError(f"'type takes 1 field(s), not {len(fields)}")
-    value = fields[0]
-    if isinstance(value, Symbol):
-        if value.name == "auto":
-            raise SexprError("'type, 'auto is only valid for an unannotated var/define target")
-        return ast.TypeExpr([value.name])
-    q_kind, q_fields = _fields_of(value)
-    if q_kind != "qualified_name":
-        raise SexprError("'type's field must be a symbol or a 'qualified_name")
-    segments = []
-    for segment in q_fields:
-        if not isinstance(segment, Symbol):
-            raise SexprError("a 'qualified_name's segments must be symbols")
-        segments.append(segment.name)
-    if not segments:
-        raise SexprError("a 'qualified_name needs at least one segment")
-    return ast.TypeExpr(segments)
-
-
-def _decode_var_type(sexpr):
-    """A `var`/`define` target's type position: `None` for the `$['type,
-    'auto]` sentinel (no annotation was written), `decode_type` otherwise."""
-    kind, fields = _fields_of(sexpr)
-    if kind == "type" and len(fields) == 1 and isinstance(fields[0], Symbol) \
-            and fields[0].name == "auto":
-        return None
-    return decode_type(sexpr)
+    return decoder(kind, fields)
 
 
 def _expect(fields: list, count: int, kind: str) -> list:
@@ -739,12 +629,53 @@ def _expect(fields: list, count: int, kind: str) -> list:
     return fields
 
 
+def _at_most_one(fields: list, kind: str):
+    if len(fields) > 1:
+        raise SexprError(f"'{kind} takes at most one value, not {len(fields)}")
+    return fields[0] if fields else None
+
+
+def decode_type(sexpr):
+    """A type position back into this AST: None for `(type auto)`, a
+    TypeExpr for one member, a TypeUnion for more."""
+    items = _as_list(sexpr, "a type")
+    if not items or items[0] != Symbol("type"):
+        raise SexprError(f"a type must be a (type ...) node, not {_type_name(sexpr)}")
+    members = [_decode_member(m) for m in items[1:]]
+    if not members:
+        raise SexprError("'type needs at least one member")
+    if len(members) == 1:
+        if members[0].parts == ["auto"]:
+            return None
+        return members[0]
+    return ast.TypeUnion(members)
+
+
+def _decode_member(member) -> ast.TypeExpr:
+    if isinstance(member, Symbol):
+        return ast.TypeExpr([member.name])
+    items = _as_list(member, "a type member")
+    if not items or items[0] != Symbol("::"):
+        raise SexprError("a type member must be a name or a (:: ...) path")
+    return ast.TypeExpr([_sym(s, "a path segment") for s in items[1:]])
+
+
+def _decode_types(sexpr) -> list:
+    """`is`'s type: the member list, as TypeCheck keeps it."""
+    tree = decode_type(sexpr)
+    if tree is None:
+        raise SexprError("'is needs a type")
+    return tree.members if isinstance(tree, ast.TypeUnion) else [tree]
+
+
 def _decode_num(kind: str, fields: list):
     value, = _expect(fields, 1, kind)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SexprError(f"'{kind}'s value must be a number, not a {_type_name(value)}")
     if kind == "int" and not isinstance(value, int):
         raise SexprError("'int's value must be an int")
+    if kind == "float":
+        value = float(value)
     return ast.Num(spell_number(value))
 
 
@@ -755,253 +686,441 @@ def _decode_str(kind: str, fields: list):
     return ast.Str(quote_string(text))
 
 
-def _decode_child(value, what: str):
-    if value is NIL or value is None:
-        return None
-    return decode(value)
+def _decode_char(kind: str, fields: list):
+    codepoint, = _expect(fields, 1, kind)
+    if isinstance(codepoint, bool) or not isinstance(codepoint, int):
+        raise SexprError("'char's codepoint must be an int")
+    return ast.Char(_spell_char(codepoint))
 
 
-def _decode_binop(kind: str, fields: list):
-    op, left, right = _expect(fields, 3, kind)
-    if not isinstance(op, Symbol):
-        raise SexprError("s-expression is missing its binop")
-    if op.name not in OPERATORS:
-        raise SexprError(f"'{op.name} is not an operator")
-    return ast.BinOp(op.name, decode(left), decode(right))
+def _decode_args(values) -> list:
+    """`apply`'s (and `decorate`'s) arguments: expressions, or the
+    `kwarg`/`spread`/`spread_kw` marked forms."""
+    out = []
+    for value in values:
+        if isinstance(value, Pair) and isinstance(value.car, Symbol):
+            head = value.car.name
+            if head == "kwarg":
+                name, arg = _expect(_as_list(value.cdr, "'kwarg"), 2, "kwarg")
+                out.append(ast.Kwarg(_sym(name, "'kwarg's name"), _expr(arg)))
+                continue
+            if head in ("spread", "spread_kw"):
+                arg, = _expect(_as_list(value.cdr, f"'{head}"), 1, head)
+                out.append((ast.SpreadPos if head == "spread" else ast.SpreadKw)(_expr(arg)))
+                continue
+        out.append(_expr(value))
+    return out
 
 
-def _decode_unop(kind: str, fields: list):
-    op, operand = _expect(fields, 2, kind)
-    if not isinstance(op, Symbol) or op.name not in _OP_TO_UNOP:
-        spelled = ", ".join(f"'{o}" for o in _OP_TO_UNOP)
-        raise SexprError(f"'unop's operator must be one of {spelled}")
-    return ast.UnaryOp(_OP_TO_UNOP[op.name], decode(operand))
+def _decode_selector(value):
+    """(name, module) from a selector: a symbol, or `(:: mod name)`."""
+    if isinstance(value, Symbol):
+        return value.name, None
+    items = _as_list(value, "a selector")
+    if len(items) == 3 and items[0] == Symbol("::"):
+        return _sym(items[2], "a selector"), _sym(items[1], "a selector's module")
+    raise SexprError("a selector must be a symbol")
 
 
-def _decode_catch(kind: str, fields: list):
-    value, handler = _expect(fields, 2, kind)
-    handled = decode(handler)
-    if kind == "catch_return":
-        handled = ast.Return(handled)
-    return ast.Catch(decode(value), handled)
+def _decode_bind_msg(receiver, selector, args):
+    name, module = _decode_selector(selector)
+    if (isinstance(receiver, Pair) and receiver.car == Symbol("tuple")
+            and module is None):
+        items = [_expr(i) for i in _as_list(receiver.cdr, "a tuple")]
+        return ast.MessageTupleExpr(items, name, args)
+    return ast.Message(_expr(receiver), name, args, module=module)
 
 
-def _decode_if(kind: str, fields: list):
-    cond, then, orelse = _expect(fields, 3, kind)
-    body = [decode(s) for s in _as_list(then, "'if's then branch")]
-    else_body = [decode(s) for s in _as_list(orelse, "'if's else branch")]
-    return ast.If(decode(cond), body, [], else_body or None)
+def _decode_apply(kind: str, fields: list):
+    if not fields:
+        raise SexprError("'apply needs a callee")
+    callee, args = fields[0], _decode_args(fields[1:])
+    if isinstance(callee, Pair) and callee.car == Symbol("bind_msg"):
+        receiver, selector = _expect(_as_list(callee.cdr, "'bind_msg"), 2, "bind_msg")
+        return _decode_bind_msg(receiver, selector, args)
+    return ast.Call(_expr(callee), args)
+
+
+def _decode_bind_msg_node(kind: str, fields: list):
+    receiver, selector = _expect(fields, 2, kind)
+    return _decode_bind_msg(receiver, selector, None)
+
+
+def _decode_scope(kind: str, fields: list):
+    if len(fields) < 2:
+        raise SexprError("'::' needs at least two segments")
+    first, rest = fields[0], fields[1:]
+    tree = ast.Name(first.name) if isinstance(first, Symbol) else _expr(first)
+    for segment in rest:
+        tree = ast.Scope(tree, _sym(segment, "a path segment"))
+    return tree
+
+
+def _decode_path(value) -> list:
+    if isinstance(value, Symbol):
+        return [value.name]
+    items = _as_list(value, "an import path")
+    if not items or items[0] != Symbol("::"):
+        raise SexprError("an import path must be a name or a (:: ...) path")
+    return [_sym(s, "a path segment") for s in items[1:]]
+
+
+def _decode_import(kind: str, fields: list):
+    if not fields:
+        raise SexprError(f"'{kind} needs a path")
+    path = _decode_path(fields[0])
+    spec = _at_most_one(fields[1:], kind)
+    tree = ast.Import(path, static=(kind == "import_static"))
+    if spec is None:
+        return tree
+    items = _as_list(spec, "an import spec")
+    head = _sym(items[0], "an import spec's head") if items else None
+    if head == "as":
+        alias, = _expect(items[1:], 1, "as")
+        tree.alias = _sym(alias, "'as's alias")
+    elif head == "items":
+        tree.items = []
+        for entry in items[1:]:
+            entry_items = _as_list(entry, "an import item")
+            if not entry_items or entry_items[0] != Symbol("item"):
+                raise SexprError("an import's items are (item name alias) forms")
+            name, alias = _expect(entry_items[1:], 2, "item")
+            tree.items.append(ast.ImportItem(_sym(name, "'item's name"),
+                                             _opt_sym(alias, "'item's alias")))
+    elif head == "all":
+        tree.wildcard = True
+        excluded = [_sym(n, "an excluded name") for n in items[1:]]
+        tree.except_names = excluded or None
+    else:
+        raise SexprError("an import spec is (as ...), (items ...) or (all ...)")
+    return tree
+
+
+def _decode_cond(kind: str, fields: list):
+    tests = []
+    orelse = None
+    for i, clause in enumerate(fields):
+        items = _as_list(clause, "a cond clause")
+        if items and items[0] == Symbol("else"):
+            if i != len(fields) - 1:
+                raise SexprError("'cond's else clause must be the last")
+            body, = _expect(items[1:], 1, "else")
+            orelse = decode_body(body)
+        else:
+            test, body = _expect(items, 2, "cond clause")
+            tests.append((_expr(test), decode_body(body)))
+    if not tests:
+        if orelse is None:
+            raise SexprError("'cond needs at least one clause")
+        return ast.If(ast.Bool(True), orelse, [], None)
+    (cond, body), rest = tests[0], tests[1:]
+    return ast.If(cond, body, [ast.ElifClause(c, b) for c, b in rest], orelse)
 
 
 def _decode_for(kind: str, fields: list):
-    var, iterable, body = _expect(fields, 3, kind)
-    if not isinstance(var, Symbol):
-        raise SexprError("'for's variable must be a symbol")
-    return ast.For(var.name, decode(iterable),
-                   [decode(s) for s in _as_list(body, "'for's body")], None)
-
-
-def _decode_target_name(value, kind: str) -> str:
-    if not isinstance(value, Symbol):
-        raise SexprError(f"'{kind}'s name must be a symbol, not a {_type_name(value)}")
-    return value.name
+    var, iterable, orelse, body = _expect(fields, 4, kind)
+    return ast.For(_sym(var, "'for's target"), _expr(iterable), decode_body(body),
+                   None if _is_nil(orelse) else decode_body(orelse))
 
 
 def _decode_define(kind: str, fields: list):
     name, type_sexpr, value = _expect(fields, 3, kind)
-    target = ast.VarTarget(_decode_target_name(name, kind), _decode_var_type(type_sexpr))
-    decoded = _decode_child(value, "'define's value")
-    return ast.VarDecl([target], None if decoded is None else [decoded])
+    target = ast.VarTarget(_sym(name, "'define's name"), decode_type(type_sexpr))
+    return ast.VarDecl([target], None if _is_nil(value) else [_expr(value)])
 
 
 def _decode_define_values(kind: str, fields: list):
-    pairs, value = _expect(fields, 2, kind)
+    targets_sexpr, value = _expect(fields, 2, kind)
     targets = []
-    for entry in _as_list(pairs, "'define_values's targets"):
-        entry_fields = _as_list(entry, "'define_values's target")
-        if len(entry_fields) != 2:
-            raise SexprError("a 'define_values target must be $[name, type]")
-        name, type_sexpr = entry_fields
-        targets.append(
-            ast.VarTarget(_decode_target_name(name, kind), _decode_var_type(type_sexpr))
-        )
+    for entry in _as_list(targets_sexpr, "'define_values's targets"):
+        name, type_sexpr = _expect(_as_list(entry, "a define_values target"), 2,
+                                   "define_values target")
+        targets.append(ast.VarTarget(_sym(name, "a define_values name"),
+                                     decode_type(type_sexpr)))
     if not targets:
         raise SexprError("'define_values needs at least one target")
-    decoded = _decode_child(value, "'define_values's value")
-    if decoded is None:
-        values = None
-    elif isinstance(decoded, ast.Tuple):
-        if len(decoded.items) != len(targets):
-            raise SexprError("'define_values's value tuple must match its targets")
-        values = decoded.items
-    else:
-        raise SexprError("'define_values's value must be a 'tuple")
-    return ast.VarDecl(targets, values)
+    return ast.VarDecl(targets, _decode_values(value, len(targets)))
 
 
-def _decode_assign_target(value):
-    if isinstance(value, Symbol):
-        return ast.NameTarget(value.name)
-    return expr_to_target(decode(value))
+def _decode_values(value, count: int):
+    """The inverse of `_values`: a `tuple` of exactly `count` values is
+    those values (`a, b := 1, 2`); any other expression is one value (to
+    destructure, `a, b := f()`)."""
+    if _is_nil(value):
+        return None
+    tree = _expr(value)
+    if count > 1 and isinstance(tree, ast.Tuple) and len(tree.items) == count:
+        return tree.items
+    return [tree]
 
 
-def _decode_assign(kind: str, fields: list):
+def _decode_target(value):
+    return expr_to_target(_expr(value))
+
+
+def _decode_set(kind: str, fields: list):
     target, value = _expect(fields, 2, kind)
-    op = "?=" if kind == "if_set" else "="
-    return ast.Assign([_decode_assign_target(target)], op, [decode(value)])
+    return ast.Assign([_decode_target(target)], "?=" if kind == "if_set" else "=",
+                      [_expr(value)])
 
 
 def _decode_set_values(kind: str, fields: list):
-    targets, value = _expect(fields, 2, kind)
-    decoded_targets = [_decode_assign_target(t)
-                       for t in _as_list(targets, "'set_values's targets")]
-    if not decoded_targets:
+    targets_sexpr, value = _expect(fields, 2, kind)
+    targets = [_decode_target(t) for t in _as_list(targets_sexpr, "'set_values's targets")]
+    if not targets:
         raise SexprError("'set_values needs at least one target")
-    decoded_value = decode(value)
-    if isinstance(decoded_value, ast.Tuple):
-        if len(decoded_value.items) != len(decoded_targets):
-            raise SexprError("'set_values's value tuple must match its targets")
-        values = decoded_value.items
-    else:
-        raise SexprError("'set_values's value must be a 'tuple")
-    return ast.Assign(decoded_targets, "=", values)
+    return ast.Assign(targets, "=", _decode_values(value, len(targets)))
 
 
-def _decode_with(kind: str, fields: list):
-    declarations, = _expect(fields, 1, kind)
-    bindings = []
-    for entry in _as_list(declarations, "'with's declarations"):
-        entry_kind, entry_fields = _fields_of(entry)
-        if entry_kind != "decl":
-            raise SexprError("a 'with's declarations are 'decl nodes")
-        name, value = _expect(entry_fields, 2, "decl")
-        if not isinstance(name, Symbol):
-            raise SexprError("'decl's name must be a symbol")
-        bindings.append(ast.WithBinding(name.name, None, decode(value)))
-    return ast.WithBlock(bindings)
+def _decode_params(sexpr) -> list:
+    out = []
+    for entry in _as_list(sexpr, "a parameter list"):
+        items = _as_list(entry, "a parameter")
+        if items and items[0] in (Symbol("*"), Symbol("**")):
+            name, _type = _expect(items[1:], 2, items[0].name)
+            cls = ast.VarPositional if items[0] == Symbol("*") else ast.VarKeyword
+            out.append(cls(_sym(name, "a parameter's name")))
+            continue
+        name, type_sexpr, default = _expect(items, 3, "parameter")
+        out.append(ast.Param(_sym(name, "a parameter's name"), decode_type(type_sexpr),
+                             _opt_expr(default)))
+    return out
+
+
+def _decode_dispatch(sexpr):
+    if _is_nil(sexpr):
+        return None
+    items = _as_list(sexpr, "a dispatch")
+    if not items or items[0] != Symbol("dispatch"):
+        raise SexprError("a dispatch must be a (dispatch type ...) form")
+    names = []
+    for entry in items[1:]:
+        t = decode_type(entry)
+        if not isinstance(t, ast.TypeExpr):
+            raise SexprError("a dispatch position names one class")
+        names.append("::".join(t.parts))
+    return names
+
+
+def _decode_fn_def(kind: str, fields: list):
+    name, dispatch, params, ret, body = _expect(fields, 5, kind)
+    return ast.FnDef(_decode_dispatch(dispatch), _sym(name, "'fn_def's name"),
+                     _decode_params(params), decode_type(ret), decode_body(body))
+
+
+def _decode_co_def(kind: str, fields: list):
+    name, dispatch, params, send, ret, body = _expect(fields, 6, kind)
+    return ast.CoDef(_decode_dispatch(dispatch), _sym(name, "'co_def's name"),
+                     _decode_params(params), decode_type(send), decode_type(ret),
+                     decode_body(body))
+
+
+def _decode_lambda(kind: str, fields: list):
+    params, ret, body = _expect(fields, 3, kind)
+    return ast.Lambda(_decode_params(params), decode_body(body), decode_type(ret))
+
+
+def _decode_co_lambda(kind: str, fields: list):
+    params, send, ret, body = _expect(fields, 4, kind)
+    return ast.CoLambda(_decode_params(params), decode_type(send), decode_type(ret),
+                        decode_body(body))
+
+
+def _decode_class_def(kind: str, fields: list):
+    name, base, body = _expect(fields, 3, kind)
+    return ast.ClassDef(_sym(name, "'class_def's name"), _opt_expr(base), decode_body(body))
+
+
+def _decode_class_expr(kind: str, fields: list):
+    base, body = _expect(fields, 2, kind)
+    return ast.ClassExpr(_opt_expr(base), decode_body(body))
+
+
+def _decode_slot_def(kind: str, fields: list):
+    name, type_sexpr, init, body = _expect(fields, 4, kind)
+    return ast.SlotDef(_sym(name, "'slot_def's name"), decode_type(type_sexpr),
+                       _opt_expr(init), None if _is_nil(body) else decode_body(body))
+
+
+def _decode_decorate(kind: str, fields: list):
+    if len(fields) < 2:
+        raise SexprError("'decorate needs a selector and a target")
+    selector, target, args = fields[0], fields[1], _decode_args(fields[2:])
+    decorator = ast.Decorator(_sym(selector, "'decorate's selector"), args, True)
+    return ast.Decorated(decorator, _any(target))
+
+
+def _decode_annotate(kind: str, fields: list):
+    key, value, target = _expect(fields, 3, kind)
+    return ast.Annotate(_sym(key, "'annotate's key"), _expr(value), _any(target))
 
 
 def _decode_defer(kind: str, fields: list):
     if kind == "defer":
         body, = _expect(fields, 1, kind)
-        return ast.Defer(False, [decode(s) for s in _as_list(body, "'defer's body")])
-    body, types = _expect(fields, 2, kind)
-    # The type list is carried but not honoured: `defer on error` is the only
-    # guard this grammar spells (see wyrm.gram's defer_stmt), so a
-    # `'defer_on` naming anything else still compiles to that one form.
-    for entry in _as_list(types, "'defer_on's type alternatives"):
-        decode_type(entry)
-    return ast.Defer(True, [decode(s) for s in _as_list(body, "'defer_on's body")])
+        return ast.Defer(None, decode_body(body))
+    on, body = _expect(fields, 2, kind)
+    return ast.Defer(decode_type(on) or ast.TypeExpr(["error"]), decode_body(body))
 
 
-def _decode_fn(kind: str, fields: list):
-    name, results, rest, kwargs, params, dispatch, body = _expect(fields, 7, kind)
-    if not isinstance(name, Symbol):
-        raise SexprError("'fn's name must be a symbol")
-    if kwargs is not NIL and kwargs is not None:
-        raise SexprError(
-            "'fn's kwargs position is reserved and must be nil "
-            "(the language has no keyword arguments)"
-        )
-    decoded = [decode(p) for p in _as_list(params, "'fn's parameters")]
-    for param in decoded:
-        if not isinstance(param, ast.Param):
-            raise SexprError("'fn's parameters are 'param nodes")
-    # The rest parameter rejoins the chain last, which is where the parser
-    # would have put it: `fn f(a, *others)`.
-    if rest is not NIL and rest is not None:
-        rest_kind, rest_fields = _fields_of(rest)
-        if rest_kind != "param":
-            raise SexprError("'fn's rest parameter must be a 'param node")
-        rest_name = rest_fields[0] if rest_fields else NIL
-        if not isinstance(rest_name, Symbol):
-            raise SexprError("'fn's rest parameter needs a name")
-        decoded.append(ast.VarPositional(rest_name.name))
-    result_types = _as_list(results, "'fn's result types")
-    if len(result_types) > 1:
-        raise SexprError(
-            "a multi-value result cannot cross into a decorator yet "
-            "(this grammar records one return type)"
-        )
-    dispatch_names = [_decode_dispatch_name(d)
-                      for d in _as_list(dispatch, "'fn's dispatch types")]
-    return ast.FnDef(
-        dispatch_names or None,
-        name.name,
-        decoded,
-        decode_type(result_types[0]) if result_types else None,
-        [decode(s) for s in _as_list(body, "'fn's body")],
-    )
+def _decode_do(kind: str, fields: list):
+    if not fields:
+        raise SexprError("'do needs at least one statement")
+    return ast.Do([_stmt(s) for s in fields])
 
 
-def _decode_flag(value, kind: str, field: str) -> bool:
-    flag_kind, flag_fields = _fields_of(value)
-    if flag_kind == "true":
-        return True
-    if flag_kind == "false":
-        return False
-    raise SexprError(f"'{kind}'s {field} must be 'true or 'false")
+def _decode_unary(kind: str, fields: list):
+    operand, = _expect(fields, 1, kind)
+    return ast.UnaryOp(_UNARY_BACK[kind], _expr(operand))
 
 
-def _decode_import_item(entry):
-    entry_kind, entry_fields = _fields_of(entry)
-    if entry_kind != "import_item":
-        raise SexprError("an import's items are 'import_item nodes")
-    name, alias = _expect(entry_fields, 2, "import_item")
-    if not isinstance(name, Symbol):
-        raise SexprError("'import_item's name must be a symbol")
-    return ast.ImportItem(name.name,
-                          _decode_dispatch_name(alias) if alias not in (NIL, None) else None)
+def _decode_logical(kind: str, fields: list):
+    if len(fields) < 2:
+        raise SexprError(f"'{kind} takes at least two operands")
+    tree = _expr(fields[0])
+    for operand in fields[1:]:
+        tree = ast.BinOp(kind, tree, _expr(operand))
+    return tree
 
 
-def _decode_import(kind: str, fields: list):
-    path, static, alias, items, wildcard, except_names = _expect(fields, 6, kind)
-    path_names = [_decode_dispatch_name(p) for p in _as_list(path, "'import's path")]
-    alias_v = _decode_dispatch_name(alias) if alias not in (NIL, None) else None
-    items_v = ([_decode_import_item(i) for i in _as_list(items, "'import's items")]
-               if items not in (NIL, None) else None)
-    except_v = ([_decode_dispatch_name(n)
-                for n in _as_list(except_names, "'import's except_names")]
-                if except_names not in (NIL, None) else None)
-    return ast.Import(path_names, alias_v, items_v,
-                      _decode_flag(wildcard, kind, "wildcard"),
-                      _decode_flag(static, kind, "static"), except_v)
+def _decode_yield(kind: str, fields: list):
+    value = _at_most_one(fields, kind)
+    return ast.Yield(None if value is None else _expr(value))
 
 
-def _decode_module(kind: str, fields: list):
-    """`'module`'s statements are spliced in directly (see `_encode_program`
-    for why), so `fields` - already just "everything after the head symbol"
-    per `_fields_of` - is the statement list as-is."""
-    return ast.Program([decode(s) for s in fields])
+def _one(cls):
+    def decoder(kind, fields):
+        value, = _expect(fields, 1, kind)
+        return cls(_expr(value))
+    return decoder
+
+
+def _optional_one(cls):
+    def decoder(kind, fields):
+        value = _at_most_one(fields, kind)
+        return cls(None if value is None else _expr(value))
+    return decoder
+
+
+def _none(factory):
+    def decoder(kind, fields):
+        _expect(fields, 0, kind)
+        return factory()
+    return decoder
+
+
+def _collection(cls):
+    return lambda kind, fields: cls([_expr(i) for i in fields])
+
+
+def _decode_dict(kind: str, fields: list):
+    entries = []
+    for entry in fields:
+        key, value = _expect(_as_list(entry, "a dict entry"), 2, "dict entry")
+        entries.append(ast.DictEntry(_expr(key), _expr(value)))
+    return ast.Dict(entries)
+
+
+def _decode_static(kind: str, fields: list):
+    name, type_sexpr, init = _expect(fields, 3, kind)
+    return ast.StaticDecl(_sym(name, "'static's name"), decode_type(type_sexpr),
+                          _opt_expr(init))
+
+
+def _decode_catch(kind: str, fields: list):
+    value, handler = _expect(fields, 2, kind)
+    return ast.Catch(_expr(value), _expr(handler))
+
+
+def _decode_attr(kind: str, fields: list):
+    obj, field = _expect(fields, 2, kind)
+    return ast.Attr(_expr(obj), _sym(field, "'attr's field"))
+
+
+def _decode_index(kind: str, fields: list):
+    obj, key = _expect(fields, 2, kind)
+    return ast.Index(_expr(obj), _expr(key))
+
+
+def _decode_is(kind: str, fields: list):
+    value, type_sexpr = _expect(fields, 2, kind)
+    return ast.TypeCheck(_expr(value), _decode_types(type_sexpr))
+
+
+def _decode_while(kind: str, fields: list):
+    cond, body = _expect(fields, 2, kind)
+    return ast.While(_expr(cond), decode_body(body))
+
+
+def _decode_sym(kind: str, fields: list):
+    value, = _expect(fields, 1, kind)
+    return ast.Symbol(_sym(value, "'sym's value"))
 
 
 _DECODERS = {
+    "module": lambda kind, fields: ast.Program([_stmt(s) for s in fields]),
+    # literals
+    "nil": _none(lambda: ast.Name("nil")),
+    "true": _none(lambda: ast.Bool(True)),
+    "false": _none(lambda: ast.Bool(False)),
     "int": _decode_num,
     "float": _decode_num,
     "str": _decode_str,
-    "nil": lambda kind, fields: ast.Name("nil"),
-    "import": _decode_import,
-    "binop": _decode_binop,
-    "unop": _decode_unop,
-    "catch": _decode_catch,
-    "catch_return": _decode_catch,
-    "if": _decode_if,
-    "for": _decode_for,
+    "sym": _decode_sym,
+    "char": _decode_char,
+    "ellipsis": _none(ast.EllipsisExpr),
+    # collections
+    "tuple": _collection(ast.Tuple),
+    "array": _collection(ast.Array),
+    "list": _collection(ast.Pair),
+    "dict": _decode_dict,
+    # names and paths
+    "::": _decode_scope,
+    "attr": _decode_attr,
+    "index": _decode_index,
+    # operators
+    "neg": _decode_unary,
+    "pos": _decode_unary,
+    "~": _decode_unary,
+    "not": _decode_unary,
+    "and": _decode_logical,
+    "or": _decode_logical,
+    "is": _decode_is,
+    # application
+    "apply": _decode_apply,
+    "bind_msg": _decode_bind_msg_node,
+    # bindings
     "define": _decode_define,
     "define_values": _decode_define_values,
-    "set": _decode_assign,
-    "if_set": _decode_assign,
+    "static": _decode_static,
+    "set": _decode_set,
+    "if_set": _decode_set,
     "set_values": _decode_set_values,
-    "with": _decode_with,
+    # control
+    "do": _decode_do,
+    "cond": _decode_cond,
+    "while": _decode_while,
+    "for": _decode_for,
+    "break": _optional_one(ast.Break),
+    "continue": _none(ast.Continue),
+    "pass": _none(ast.Pass),
+    "return": _optional_one(ast.Return),
+    "yield": _decode_yield,
+    "yield_from": lambda kind, fields: ast.Yield(_expr(_expect(fields, 1, kind)[0]), True),
+    "try": _one(ast.Try),
+    "catch": _decode_catch,
     "defer": _decode_defer,
     "defer_on": _decode_defer,
-    "fn": _decode_fn,
-    "module": _decode_module,
-    # `this` is its own node here and a plain name there, so the general
-    # `'name` row can't serve both - this one splits them by name.
-    "name": lambda kind, fields: (
-        ast.ThisRef() if (len(fields) == 1 and isinstance(fields[0], Symbol)
-                          and fields[0].name == "this")
-        else _decode_row(_ROWS_BY_KIND["name"], kind, fields)
-    ),
+    # definitions
+    "fn_def": _decode_fn_def,
+    "co_def": _decode_co_def,
+    "lambda": _decode_lambda,
+    "co_lambda": _decode_co_lambda,
+    "class_def": _decode_class_def,
+    "class_expr": _decode_class_expr,
+    "slot_def": _decode_slot_def,
+    "decorate": _decode_decorate,
+    "annotate": _decode_annotate,
+    "import": _decode_import,
+    "import_static": _decode_import,
 }

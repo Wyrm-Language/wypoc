@@ -6,7 +6,7 @@ c_area_fn := shapes::Circle
 
 greeted := std::io::println("hi")
 
-from std::io import println
+import std::io::(println)
 direct := println("direct")
 
 import std::io::*

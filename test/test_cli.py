@@ -190,48 +190,42 @@ def test_falling_off_the_end_tears_down_a_spawned_thread_without_hanging(tmp_pat
 
 
 # --------------------------------------------------------------------------
-# --dump-wys and running a .wys file directly (see wypoc/wys.py).
+# --dump-ast: the canonical tree, one line, Scheme s-expression form.
 # --------------------------------------------------------------------------
 
-def test_dump_wys_writes_a_compiled_unit(tmp_path):
+def test_dump_ast_prints_the_canonical_tree(tmp_path):
     src = tmp_path / "hello.wy"
     src.write_text('fn greet(name) {\n    print("hi " + name)\n}\n\ngreet("wyrm")\n')
-    out = tmp_path / "hello.wys"
-    r = run("--dump-wys", "-o", str(out), str(src))
+    r = run("--dump-ast", str(src))
     assert r.returncode == 0, f"stderr={r.stderr!r}"
-    text = out.read_text()
-    assert text.startswith("$['module, ")
-    assert '"hi "' in text  # a real string literal, not the REPL's 'hi ' form
+    assert r.stdout == (
+        '(module (fn_def greet () ((name (type auto) ())) (type auto) '
+        '(apply print (+ (str "hi ") name))) (apply greet (str "wyrm")))\n'
+    )
 
 
-def test_dump_wys_to_stdout_without_o():
-    r = run("--dump-wys", SAMPLE)
+def test_dump_ast_accepts_c():
+    r = run("--dump-ast", "-c", "x := 1")
     assert r.returncode == 0, f"stderr={r.stderr!r}"
-    assert r.stdout.startswith("$['module, ")
+    assert r.stdout == "(module (define x (type auto) (int 1)))\n"
 
 
-def test_running_a_wys_file_matches_running_its_source(tmp_path):
-    src = tmp_path / "hello.wy"
-    src.write_text('print(1 + 2)\nprint("ok")\n')
-    out = tmp_path / "hello.wys"
-    dumped = run("--dump-wys", "-o", str(out), str(src))
-    assert dumped.returncode == 0, f"stderr={dumped.stderr!r}"
-
-    from_source = run(str(src))
-    from_wys = run(str(out))
-    assert from_wys.returncode == 0, f"stderr={from_wys.stderr!r}"
-    assert from_wys.stdout == from_source.stdout == "3ok"
-
-
-def test_dump_wys_expands_decorators(tmp_path):
-    """--dump-wys runs expand_decorators itself, so a source file with a
-    decorator still dumps cleanly - `@__identity` answers the tree it was
-    given, unchanged, so the output has no `decorat` substring left in it."""
+def test_dump_ast_leaves_decorators_unexpanded(tmp_path):
+    """--dump-ast is the parser's output: a decorator is a `decorate` node,
+    and nothing is run or imported to expand it."""
     src = tmp_path / "deco.wy"
-    src.write_text("@__identity fn f() { return 1 }\n")
-    r = run("--dump-wys", str(src))
+    src.write_text("import nowhere::*\n@__identity fn f() { return 1 }\n")
+    r = run("--dump-ast", str(src))
     assert r.returncode == 0, f"stderr={r.stderr!r}"
-    assert "decorat" not in r.stdout
+    assert "(decorate __identity (fn_def f " in r.stdout
+
+
+def test_dump_ast_reports_a_located_syntax_error(tmp_path):
+    src = tmp_path / "bad.wy"
+    src.write_text("x := )\n")
+    r = run("--dump-ast", str(src))
+    assert r.returncode == 1
+    assert r.stderr.startswith("1:6: ")
 
 
 # --------------------------------------------------------------------------
@@ -341,12 +335,13 @@ def test_no_tui_overrides_the_configured_default():
 
 def test_configured_compact_reaches_the_repl():
     assert run("--config", "compact=true").returncode == 0
-    r = run(stdin="$[1, 2, 3]\n:quit\n")
+    long = "[" + ", ".join(["1000000000"] * 10) + "]"
+    r = run(stdin=long + "\n:quit\n")
     assert r.returncode == 0, f"stderr={r.stderr!r}"
-    # Commas mean `$[1, 2, 3]` (compact) rather than the pretty `(1 2 3)`;
-    # the brackets themselves are wrapped in colour escapes, so the string
-    # isn't there contiguously to look for.
-    assert "1, 2, 3" in r.stdout, "the config file's compact took effect"
+    # The compact rendering rather than the pretty one-element-per-line
+    # layout a list this long gets (which indents each element).
+    assert "1000000000, 1000000000" in r.stdout
+    assert "    1000000000," not in r.stdout, "the config file's compact took effect"
 
 
 # --------------------------------------------------------------------------

@@ -142,15 +142,13 @@ def _format(value, repr_mode: bool, ctx: dict | None = None) -> str:
     if value is ELLIPSIS:
         return "..."
     if isinstance(value, Pair):
-        # Printed in the literal syntax that builds it - `$[1, 2, 3]`, and
-        # `$[1, 2 . 3]` when the chain ends in something other than nil.
-        parts = []
-        node = value
-        while isinstance(node, Pair):
-            parts.append(_format(node.car, True, ctx))
-            node = node.cdr
-        tail = "" if node is NIL or node is None else f" . {_format(node, True, ctx)}"
-        return f"$[{', '.join(parts)}{tail}]"
+        # Scheme s-expression form, the one printer every pair list goes
+        # through (see sexp_print): `(1 (2 3) a "s")`, `(1 . 2)`, and `()`
+        # for an empty list nested inside one. An element with no Scheme
+        # spelling (an array, a dict, an instance) renders as it would in
+        # any other container.
+        from wypoc import sexp_print
+        return sexp_print.write(value, other=lambda v: _format(v, True, ctx))
     if isinstance(value, bytearray):
         # Length-only summary ("3 bytes").
         return f"{len(value)} bytes"
@@ -890,7 +888,8 @@ def _help_signature(node, keyword: str) -> str:
         params = ", ".join(getattr(p, "name", "?") for p in node.params)
         return f"fn ({params})"
     if isinstance(node, ast.ClassDef):
-        bases = ", ".join(getattr(b, "name", None) or str(b) for b in node.bases)
+        base = node.base
+        bases = (getattr(base, "id", None) or str(base)) if base is not None else ""
         return f"class {node.name}" + (f"({bases})" if bases else "")
     return _render_signature(node, keyword)
 

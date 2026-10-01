@@ -43,10 +43,9 @@ bool_literal    ::= "true" | "false" ;
 nil_literal     ::= "nil" ;
 
 (* `$` is an ordinary identifier character, in any position: `$ast`, `a$b`,
-   `reg$0` are all names. The `$` of the pair-list sigil `$[` is still the
-   operator it always was - a `$` only begins a name when a letter follows
-   it. `$ast` (see scope_op) is reserved language-wide; the rest of the
-   `$`-family (`$name`, `$line`, `$doc`) is not built yet. *)
+   `reg$0` are all names, and none is reserved. The `$` of the pair-list
+   sigil `$[` is still the operator it always was - a `$` only begins a name
+   when a letter follows it. *)
 identifier      ::= ( letter | "$" , letter ) , { letter | digit | "$" } ;
 
 symbol_literal  ::= "'" , ( identifier | operator_symbol ) ;
@@ -119,9 +118,7 @@ stmt_line       ::= { decorator } ,
                      | var_stmt
                      | assignment_stmt
                      | static_stmt
-                     | with_stmt_simple
                      | import_stmt
-                     | with_block
                      | defer_stmt
                      | fn_def
                      | co_def
@@ -166,13 +163,6 @@ assign_op       ::= "=" | "?=" | ":=" ;
 static_stmt     ::= "static" , identifier , [ ":" , type_constraint ] , [ "=" , expression ] ;
 
 type_expr       ::= identifier , { "::" , identifier } ;   (* e.g. mod::Type *)
-
-with_stmt_simple ::= "with" , with_binding ;
-
-with_block      ::= "with" , ":" , NEWLINE , INDENT ,
-                     { with_binding , stmt_sep } ,
-                     DEDENT ;
-with_binding    ::= identifier , [ ":" , type_constraint ] , "=" , expression ;
 
 
 (* ---------------------------------------------------------------------
@@ -234,15 +224,14 @@ co_param_list   ::= "<-" , type_constraint , [ "," , param_list ]   (* send-type
    6. Classes
    --------------------------------------------------------------------- *)
 
-class_def       ::= "class" , identifier , [ "(" , [ arg_list ] , ")" ] , block ;
+(* At most one base (single inheritance). *)
+class_def       ::= "class" , identifier , [ "(" , [ expression ] , ")" ] , block ;
 
+(* A block makes a virtual slot: no storage, and `fn getter`/`fn setter`
+   defined in the block are called to read and write it. A default and a
+   block together parse, but are an error (a virtual slot has no default). *)
 slot_def        ::= "slot" , identifier , [ ":" , type_constraint ] ,
-                     [ "=" , expression ] , [ "with" , slot_options ] ;
-
-slot_options    ::= ":" , NEWLINE , INDENT , { slot_option , stmt_sep } , DEDENT
-                   | "{" , { slot_option , [ ";" ] } , "}" ;
-
-slot_option     ::= ( "setter" | "getter" ) , "=" , ( expression | "undefined" ) ;
+                     [ "=" , expression ] , [ block ] ;
 
 
 (* ---------------------------------------------------------------------
@@ -253,21 +242,27 @@ expression      ::= tuple_expr ;
 expr_list       ::= expression , { "," , expression } ;
 tuple_expr      ::= assign_expr , { "," , assign_expr } ;        (* comma = tuple *)
 
-assign_expr     ::= set_if_unset_expr | catch_expr ;
+assign_expr     ::= set_if_unset_expr | try_expr ;
 set_if_unset_expr
                 ::= or_expr , [ "?=" , or_expr ] ;
 
-catch_expr      ::= try_operand , [ "catch" , or_expr ] ;
-try_operand     ::= [ "try" ] , or_expr ;
+(* `catch` binds tighter than `try`: `try f() catch 0` is
+   `try (f() catch 0)`. A handler is `return [expression]` or a full
+   expression, so `a catch b catch c` is `a catch (b catch c)`. *)
+try_expr        ::= "try" , catch_expr | catch_expr ;
+catch_expr      ::= or_expr , [ "catch" , catch_handler ] ;
+catch_handler   ::= "return" , [ expression ] | try_expr ;
 
 or_expr         ::= and_expr , { "or" , and_expr } ;
 and_expr        ::= not_expr , { "and" , not_expr } ;
 not_expr        ::= "not" , not_expr
                    | comparison ;
 
-(* `a is not T` is exactly `not (a is T)`, and is built as that rather than
-   as a negated check of its own. *)
+(* `a is not T` is exactly `not (a is T)`, and `a not in b` is
+   `not (a in b)`; each is built as that rather than as a form of its own.
+   Comparisons don't chain. *)
 comparison      ::= bitwise_or_expr , "is" , [ "not" ] , type_constraint
+                   | bitwise_or_expr , "not" , "in" , bitwise_or_expr
                    | bitwise_or_expr , [ comp_op , bitwise_or_expr ] ;
 comp_op         ::= "<=" | ">=" | "<=>" | "<" | ">" | "==" | "!=" | "in" ;
 
@@ -302,19 +297,13 @@ call_op         ::= "(" , [ arg_list ] , ")" ;
 index_op        ::= "[" , expression , "]" ;
 attr_op         ::= "." , identifier ;
 message_op      ::= "!" , identifier , [ "(" , [ arg_list ] , ")" ] ;
-(* `foo::$ast` is a definition's own tree as a value - `::` because it
-   resolves a name statically in a namespace, where `.` would ask the
-   runtime value (a closure) for an attribute it hasn't got. `$ast` is one
-   identifier (`$` is an identifier character - see above), reserved
-   language-wide: it cannot be used as an ordinary name anywhere. The rest
-   of the `$`-family (`$name`, `$line`, `$doc`) is not built, so
-   `foo::$whatever` is an ordinary `::` lookup of a `$`-spelled name. *)
-scope_op        ::= "::" , identifier
-                   | "::" , "$ast" ;
+(* `foo::$ast` is an ordinary `::` path; what makes it a definition's own
+   tree is name resolution, not syntax. *)
+scope_op        ::= "::" , identifier ;
 
 attr_ref        ::= postfix_expr , "." , identifier ;
 
-arg_list        ::= argument , { "," , argument } ;
+arg_list        ::= argument , { "," , argument } , [ "," ] ;
 argument        ::= expression
                    | identifier , "=" , expression          (* keyword argument *)
                    | "*" , expression                       (* spread positional *)
@@ -328,12 +317,10 @@ primary         ::= literal
                    | pair_literal
                    | dict_literal
                    | message_tuple_expr
-                   | "this"
-                   | "super" , "(" , [ arg_list ] , ")"
                    | "return" , [ expression ]
                    | "yield" , "from" , expression
                    | "yield" , [ expression ]
-                   | "break"
+                   | "break" , [ expression ]
                    | "continue"
                    | "pass"
                    | if_stmt
@@ -352,7 +339,7 @@ literal         ::= nil_literal
                    | symbol_literal
                    | ellipsis_literal ;
 
-array_literal   ::= "[" , [ expr_list ] , "]" ;
+array_literal   ::= "[" , [ expr_list , [ "," ] ] , "]" ;
 
 pair_literal    ::= "$[" , [ pair_body ] , "]" ;             (* cons-list primitive *)
 pair_body       ::= pair_element , { "," , pair_element } ;
@@ -371,7 +358,7 @@ message_tuple_expr
 
 lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , [ "->" , type_constraint ] , block ;
 co_lambda_expr  ::= "co" , "(" , [ co_param_list ] , ")" , [ "->" , type_constraint ] , block ;
-class_expr      ::= "class" , [ "(" , [ arg_list ] , ")" ] , block ;
+class_expr      ::= "class" , [ "(" , [ expression ] , ")" ] , block ;
 
 do_expr         ::= "do" , block ;
 
@@ -381,9 +368,13 @@ do_expr         ::= "do" , block ;
    --------------------------------------------------------------------- *)
 
 (* and, break, catch, class, co, continue, defer, do, elif, else,
-   false, fn, for, from, getter, if, import, in, is, nil, not, or,
-   pass, return, setter, slot, static, super, this, true, try, undefined,
-   var, while, with, yield
+   false, fn, for, from, if, import, in, is, nil, not, or,
+   pass, return, slot, static, true, try, var, while, yield
+
+   `this` and `super` are not keywords: they are names the enclosing
+   method binds (`super` is the next more general method), and nothing may
+   declare or assign them. `with`, `getter`, `setter`, `undefined` and
+   `defined` are ordinary identifiers.
 
    Soft keywords (reserved only inside their own construct, still valid as
    ordinary identifiers elsewhere): on (see defer_stmt); as, except

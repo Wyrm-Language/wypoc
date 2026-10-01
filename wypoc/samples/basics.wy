@@ -1,7 +1,7 @@
 import mod
 import mod::baz::bar
 
-from mod import function
+import mod::(function)
 
 import math::*
 import math::sin
@@ -19,11 +19,8 @@ forward ?= 5
 var foo_with_type: int
 foo_with_type ?= 5
 
-with speed_of_light: float = 299_792_458.0
-
-with:
-    speed_of_light: float = 299_792_458.0
-    gravitational_constant = 6.6743e-11
+var speed_of_light: float = 299_792_458.0
+gravitational_constant := 6.6743e-11
 
 if foo:
     action()
@@ -31,7 +28,7 @@ another_action()
 
 if foo { action(); } another_action();
 
-if defined('foo):
+if foo != nil:
     foo = foo + 1
 else:
     foo = 1

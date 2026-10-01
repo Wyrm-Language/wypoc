@@ -1,4 +1,6 @@
 """Helper builders used by the generated pegen parser's grammar actions."""
+import token
+
 from wypoc.ast_nodes import (
     Assign, BinOp, Char, IndexTarget, NameTarget, Str, Symbol, Tuple,
     TypeExpr, VarDecl, VarTarget, merge_spans,
@@ -135,3 +137,24 @@ def fold_index_target(base, indices):
         node = IndexTarget(node, idx, pos=merge_spans(
             getattr(node, "pos", None), getattr(idx, "pos", None)))
     return node
+
+
+_ENDS_AN_INLINE_BLOCK = frozenset({"}", ")", "]", ",", "else", "elif"})
+
+
+def at_statement_end(parser) -> bool:
+    """Whether a statement with no `;` or newline after it still ended:
+    the next token closes its block (`}`, a dedent, the end of input) or
+    the expression an inline block sits in (`)`, `]`, `,`, an `else` or
+    `elif` - none of which can start a statement), or the statement itself
+    ended in an indented block - `f := fn():` and its body, whose dedent is
+    the separator. Anything else is a juxtaposed statement (design
+    syntax.md G0)."""
+    tokens = parser._tokenizer._tokens
+    index = parser._mark()
+    following = parser._tokenizer.peek()
+    if following.type in (token.DEDENT, token.ENDMARKER):
+        return True
+    if following.string in _ENDS_AN_INLINE_BLOCK:
+        return True
+    return index > 0 and tokens[index - 1].type == token.DEDENT

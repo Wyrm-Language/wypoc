@@ -29,8 +29,10 @@ tools/generate_parser.py  regenerates parser.py from wyrm.gram
   ast_nodes.py            typed AST node classes built by the parser actions
   parse.py                glues the tokenizer + generated parser together
   wyrm_eval_parse_tree.py the tree-walking evaluator (the interpreter proper)
-  sexpr.py                the s-expression wire format a tree crosses in/out of
-                           wyrm code (what a decorator sees) - see below
+  sexpr.py                the canonical tree a syntax tree crosses in/out of
+                           wyrm code as (what a decorator sees) - see below
+  sexp_print.py           Scheme s-expression printing: `--dump-ast`, `str()`,
+                           `println` and the REPL all print pair lists with it
   wyrm_modules.py         WYRM_PATH search-path resolution (no eval/parse dependency)
   wyrm_io.py              POSIX-ish low-level I/O primitives (__open/__read/...)
   symbols.py              static symbol table for one parsed module
@@ -257,18 +259,17 @@ reads and builds trees.
 
 Three pieces make it work.
 
-- **`sexpr.py`** — the wire format, both directions, from one table (`ROWS`).
-  A node is a pair list whose head is a symbol naming its kind:
-  `1 + 2` is `$['binop, '+, $['int, 1], $['int, 2]]`. The format has no
-  boolean fields on purpose — a distinction in what a node *is* becomes a
-  kind of its own (`'defer`/`'defer_on`, `'catch`/`'catch_return`,
-  `'true`/`'false`), and a distinction in what role a child *plays* becomes a
-  position (a `*rest` parameter). Where this AST spells such a distinction as
-  a field, a row carries the value that field takes, which is the one place
-  the two spellings meet. A construct the format doesn't carry fails by name
-  (`a coroutine cannot cross into a decorator yet`) rather than crossing
-  half-translated. The module docstring lists where this AST's shape forces a
-  difference from the reference implementation's.
+- **`sexpr.py`** — the canonical tree, both directions. The shapes are the
+  wyrm project's canonical AST (its design notes' `ast.md`, with the schema as
+  data in the conformance corpus, which `wyrm --dump-ast` is checked
+  against). Every list is a pair list, and a node's head is a symbol:
+  `1 + 2` is `(+ (int 1) (int 2))`, `f(x)` is `(apply f x)`, `if a: b` is
+  `(cond (a b))`. A bare symbol in an expression position is a name. A body
+  is one form, the statement itself or `(do s ...)`. An absent field is `()`
+  and a missing type is `(type auto)`. wypoc's own `signal`/`emit`/`task`/
+  `thread` have no canonical tree yet, so they fail by name (`a signal has no
+  canonical tree yet`) rather than crossing half-translated. The module
+  docstring lists where this AST's shape differs from the canonical one.
 - **`TreeBase` and `sexpr(x)`** (`wyrm_eval_parse_tree.py`) — a decorator is
   `fn [TreeBase] name(...)`, so the tree it receives is boxed as a real class
   instance and found by ordinary message dispatch. `sexpr(x)` is three cases
@@ -303,9 +304,15 @@ node — the template is a real function and `...` marks where the decorated
 body lands. It resolves through the *binding*, so it describes the definition
 after decoration.
 
-`@__dump X` (prints the s-expression, compiles `X` unchanged) and
-`@__identity X` (rebuilds `X` from its s-expression, so every use is a full
-round trip) are native, and need no import at all.
+`foo::$ast` is an ordinary `::` path: no `$` name is reserved, and what makes
+`$ast` special is that `::` resolves it to the definition's tree.
+
+`@__dump X` (prints the tree, compiles `X` unchanged) and `@__identity X`
+(rebuilds `X` from its tree, so every use is a full round trip) are native,
+and need no import at all. `@template` is a library decorator,
+`import wyrm::template::*` (`corelib/wyrm/template.wy`): it answers
+`(annotate template (true) X)`, metadata for a compiler that this interpreter
+evaluates through.
 
 `samples/decorators.wy` runs every node kind through `@__identity` and then
 through the wyrm-written decorators in `samples/decolib.wy`;
@@ -488,7 +495,9 @@ Or a single file:
 | `test_symbol_index.py` | `symbol_index.py` across files, against a throwaway module tree under `tmp_path`: every `import` form resolving to the right file/declaration, aliases and `::` chains followed through to the original, wildcard `except`, open documents shadowing disk, and unparseable files answering empty instead of raising. |
 | `test_positions.py` | Source spans on the AST: every node of every sample carries a well-formed `pos`, `name_pos` covers just the identifier while `pos` covers the whole construct, parallel `<field>_pos` lists line up with their name lists, and folded chains (`a + b * c`, `this.origin.x`, `shape!area()`) span the whole expression. Run this after any `wyrm.gram` change - a new rule that forgets `LOCATIONS` fails here. |
 | `test_completion.py` | `completion.py`: reading the trigger/prefix out of raw text (including a decimal point that isn't an attribute access), what each trigger offers, the scope ordering, a loop variable's range, and that a document which doesn't parse - or never has - still answers. Plus the `lsp.py` adapter's replacement range and kind mapping. |
-| `test_sexpr.py` | `sexpr.py` on its own: each node kind's documented s-expression shape, that every kind round-trips, the irregular cases (`elif` as a nested `if`, the `*rest` position, qualified types, a union collapsing), and each failure mode - a construct the format lacks, and a malformed s-expression coming back. |
+| `test_sexpr.py` | `sexpr.py` on its own: each node kind's canonical shape, that every kind and every sample round-trips, and each failure mode - a construct with no canonical tree, and a malformed tree coming back. |
+| `test_sexp_print.py` | `sexp_print.py`: the Scheme form of pair lists, symbols, strings (escapes) and numbers, and `str()` of a pair list using it. |
+| `test_eval_canonical.py` | The evaluator side of the canonical-AST syntax: virtual slots, `this`/`super` as bound names, `name::$ast`, `try`/`catch` precedence, anonymous classes and coroutines, `break x`, `not in`, single inheritance. |
 | `test_eval_decorators.py` | `samples/decorators.wy` end to end: every kind through `@__identity`, definitions rebuilt and still binding, decorators written in wyrm (`samples/decolib.wy`) rewriting bodies and reading signatures, templates and `$ast`, the `__sexpr` hook - plus the failure modes a sample can't reach (an unreachable decorator, a non-tree answer, a qualified name, the once-per-node rewrite). |
 
 ## Known gaps
@@ -497,14 +506,12 @@ Things that are deliberately unimplemented (or only partially implemented)
 rather than silently wrong (each raises `NotImplementedError`/`TypeError`
 with a clear message at the point it'd be needed, or is called out below):
 
-- **`super()`** doesn't evaluate - single-dispatch "call up the inheritance
-  tree" isn't wired up yet, unlike the rest of message dispatch.
 - **Multi-value unpack from a single multi-valued expression** isn't
   supported - `a, b := f()` (or `a, b = f()`) requires `len(targets) ==
   len(values)`; it can't unpack one call that itself returns a tuple. This
   affects a few of the spec's own worked examples (e.g.
   `greeting, name := arguments`).
-- **`do`/`defer`/`with` are basic-use implementations**, not fully
+- **`do`/`defer` are basic-use implementations**, not fully
   conforming (see wyrm_eval_parse_tree.py's `run_scoped_block`/
   `Scope.defers`): `do:`'s value is only threaded through when its last
   statement is a bare expression (a block ending in `if`/`while`/`for`
@@ -512,20 +519,17 @@ with a clear message at the point it'd be needed, or is called out below):
   see below); `defer` is tied to whichever block Scope it's lexically
   written in (an `if`/`while`/`for` body, not only the enclosing function
   call), so a defer inside a loop body fires once per iteration rather than
-  once per call; `with` declares an immutable binding but doesn't do any
-  of the type-checking the spec's type constraints imply elsewhere either.
+  once per call.
 - **`if`/`while`/`for` don't produce a value** the way the spec's "Like
   other statements... produce the value of the last statement executed"
   note describes - `eval_stmt` returns a value only for a bare expression
   statement, not for compound statements. This is what limits `do:`'s value
   threading above.
-- **Slot `setter`/`getter` options** are parsed (`SlotOption`) but not
-  consulted - direct slot access never runs a custom setter/getter.
-- **Decorated classes** aren't supported: `@dec class Foo:` parses, but a
-  class has no kind in the s-expression format (slots and methods need more
-  than a name and a body before they can cross), so it fails at the crossing
-  rather than at the parse. Coroutines are the same - `'co` is unbuilt, so a
-  `co` does not cross in either direction.
+- **A virtual slot is reached only through `.`** (`this.age`, `p.age`): a
+  method body's bare slot names alias the instance's storage, and a virtual
+  slot has none.
+- **A module-level `slot`** parses, and runs as a plain variable; what it
+  means is still a research item.
 - **The `static` in `import static` is recorded, not enforced** - nothing
   checks the spec's usage restrictions (no closures, no class construction,
   no runtime message invocation), and the module is run on import either

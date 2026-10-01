@@ -6,8 +6,8 @@
 # once this module's messages are in its own message table - `import
 # decolib::*` puts them there.
 #
-# `sexpr(x)` is the canonical s-expression of a tree (see wypoc/sexpr.py's
-# module docstring for the format).
+# `sexpr(x)` is the canonical tree (see wypoc/sexpr.py's module docstring
+# for the format): pair lists throughout, `(head field ...)`.
 
 import std::io::*
 
@@ -18,45 +18,69 @@ fn nth(node, n) -> TreeBase:
         i = i + 1
     return car(node)
 
-# A `fn` node is
-# $['fn, name, results, rest, kwargs, params, dispatch, body].
-_FN_BODY := 7
+# A `fn_def` node is (fn_def name dispatch params ret body).
+_FN_PARAMS := 3
+_FN_BODY := 5
 
 fn rebuild_fn(s, body):
-    return $['fn, nth(s, 1), nth(s, 2), nth(s, 3), nth(s, 4), nth(s, 5), nth(s, 6), body]
+    return $['fn_def, nth(s, 1), nth(s, 2), nth(s, 3), nth(s, 4), body]
+
+# An array as a pair list - trees are made of pair lists only.
+fn pairs(arr):
+    out := nil
+    i := len(arr) - 1
+    while i >= 0:
+        out = cons(arr[i], out)
+        i = i - 1
+    return out
+
+# A body is one form: the statement itself, or (do s ...) for several.
+# These two convert between that and an array of statements.
+fn statements(body) -> list:
+    out := []
+    if body is pair and car(body) == 'do:
+        for stmt in cdr(body):
+            out ! append(stmt)
+    else:
+        out ! append(body)
+    return out
+
+fn as_body(stmts):
+    if len(stmts) == 1:
+        return stmts[0]
+    return cons('do, pairs(stmts))
 
 # Answers what it was given, still boxed - the other half of the return
-# contract, which takes an s-expression or a TreeBase.
+# contract, which takes a tree or a TreeBase.
 fn [TreeBase] unchanged():
     return this
 
 # Prepends a `println` to a definition's body.
 fn [TreeBase] traced(label):
     s := sexpr(this)
-    announce := $['expr_stmt, $['call, $['name, 'println], [$['str, label]]]]
-    out := [announce]
-    for stmt in nth(s, _FN_BODY):
+    out := [$['apply, 'println, $['str, label]]]
+    for stmt in statements(nth(s, _FN_BODY)):
         out ! append(stmt)
-    return rebuild_fn(s, out)
+    return rebuild_fn(s, as_body(out))
 
 # Replaces a definition's body outright, ignoring what was written.
 fn [TreeBase] constant(value):
-    return rebuild_fn(sexpr(this), [$['return, $['int, value]]])
+    return rebuild_fn(sexpr(this), $['return, $['int, value]])
 
 # An expression decorator: `@scaled(3) x` becomes `x * 3`.
 fn [TreeBase] scaled(factor):
-    return $['binop, '*, sexpr(this), $['int, factor]]
+    return $['*, sexpr(this), $['int, factor]]
 
 # Reads the signature it was handed rather than rewriting it: answers a
 # function returning its own parameter count.
 fn [TreeBase] arity():
     s := sexpr(this)
-    n := len(nth(s, 5))
-    return rebuild_fn(s, [$['return, $['int, n]]])
+    n := len(nth(s, _FN_PARAMS))
+    return rebuild_fn(s, $['return, $['int, n]])
 
-# A type is always $['type, x]: x is a bare name symbol ($['type, 'int]) or,
-# qualified, a nested $['qualified_name, seg, ..., name] - the name is x
-# itself in the first case, its last segment in the second.
+# A type is (type member ...): a member is a bare name symbol, or a path
+# (:: seg ... name) when qualified - the name is the member itself in the
+# first case, its last segment in the second. No annotation is (type auto).
 fn type_name(ty) -> TreeBase:
     x := nth(ty, 1)
     if x is sym:
@@ -66,19 +90,20 @@ fn type_name(ty) -> TreeBase:
         segs = cdr(segs)
     return car(segs)
 
-# Reads the *types* in a signature. Types are carried by the format and
+# Reads the *types* in a signature. Types are carried by the tree and
 # enforced by nothing, which is exactly what makes them a decorator's to
-# read: this one answers the declared parameter type names as a list.
+# read: this one answers the declared parameter type names as an array. A
+# parameter is (name type default).
 fn [TreeBase] param_types():
     s := sexpr(this)
     out := []
-    for param in nth(s, 5):
-        ty := nth(param, 2)
-        if ty == nil:
+    for param in nth(s, _FN_PARAMS):
+        name := type_name(nth(param, 1))
+        if name == 'auto:
             out ! append($['str, "?"])
         else:
-            out ! append($['str, str(type_name(ty))])
-    return rebuild_fn(s, [$['return, $['list, out]]])
+            out ! append($['str, str(name)])
+    return rebuild_fn(s, $['return, cons('array, pairs(out))])
 
 # --- templates ------------------------------------------------------------
 #
@@ -87,20 +112,18 @@ fn [TreeBase] param_types():
 # marks where the decorated body goes.
 
 fn is_hole(stmt) -> bool:
-    if car(stmt) != 'expr_stmt:
-        return false
-    return car(nth(stmt, 1)) == 'ellipsis
+    return stmt is pair and car(stmt) == 'ellipsis
 
-# Splices `body` into `template` at its `...`.
+# Splices `body` (an array of statements) into `template` at its `...`.
 fn expand_template(template, body) -> list:
     out := []
-    for stmt in nth(sexpr(template), _FN_BODY):
+    for stmt in statements(nth(sexpr(template), _FN_BODY)):
         if is_hole(stmt):
             for inner in body:
                 out ! append(inner)
         else:
             out ! append(stmt)
-    return out
+    return as_body(out)
 
 # Anything after the hole is only reached if the body falls off the end - a
 # spliced `return` leaves it unreachable, exactly as writing it out would.
@@ -113,13 +136,13 @@ fn _framed():
 
 fn [TreeBase] framed():
     s := sexpr(this)
-    return rebuild_fn(s, expand_template(_framed::$ast, nth(s, _FN_BODY)))
+    return rebuild_fn(s, expand_template(_framed::$ast, statements(nth(s, _FN_BODY))))
 
 # The same, with the template named by the caller: a `$ast` is as available
 # at decoration time as a literal is, so it can be a decorator argument.
 fn [TreeBase] using_template(template):
     s := sexpr(this)
-    return rebuild_fn(s, expand_template(template, nth(s, _FN_BODY)))
+    return rebuild_fn(s, expand_template(template, statements(nth(s, _FN_BODY))))
 
 # --- the `__sexpr` hook ---------------------------------------------------
 #

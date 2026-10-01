@@ -60,7 +60,7 @@ this grammar's shape follows from taking that literally.
 
 - **`fn_def`/`co_def`/`class_def` stay statement-only.** A name is
   mandatory for each, so using one is inherently a binding declaration
-  (same category as `var`/`assignment`/`static`/`import`/`with_block`),
+  (same category as `var`/`assignment`/`static`/`import`),
   not a value production - unlike a bare keyword, embedding a *named*
   declaration at arbitrary expression depth means resolving
   target/binding-vs-expression ambiguity at every nesting level, not just
@@ -70,8 +70,8 @@ this grammar's shape follows from taking that literally.
   and `class_expr` (`class{...}`/`class(Base){...}`, no name), each
   structurally identical to its named counterpart minus the identifier.
 
-- **`var_stmt`/`assignment_stmt`/`static_stmt`/`with_stmt_simple`/
-  `with_block`/`import_stmt`/`defer_stmt` stay statement-only** for the
+- **`var_stmt`/`assignment_stmt`/`static_stmt`/`import_stmt`/
+  `defer_stmt` stay statement-only** for the
   same LHS-isn't-one-expression-slot reason, and because the spec never
   documents a value for them (contrast: it explicitly does for literals,
   collections, `if`/`while`/`for`, and `do`). The existing grammar
@@ -83,9 +83,11 @@ this grammar's shape follows from taking that literally.
   already was despite being fn/class-body-specific - so a class body is
   just `block`, no separate `class_block`/`class_member` productions.
   (This also fixed a real bug: the old `class_block`'s indented arm never
-  consumed a separator between members, unlike its own brace arm and
-  unlike `slot_options` right below it - `block` inherits correct
-  separator handling for free.)
+  consumed a separator between members, unlike its own brace arm - `block`
+  inherits correct separator handling for free.) A slot's own optional
+  `block` makes it a virtual slot: the block defines `fn getter` and/or
+  `fn setter`, and the slot has no storage (the wyrm project's design
+  syntax.md G3, which also removed `with` and the old slot options).
 
 - **`nil` was missing entirely** - not in `literal`, not in `primary`, not
   in the keyword list - despite being a documented fundamental type and
@@ -120,6 +122,14 @@ No dedicated constructor syntax: the constructor is an ordinary method
 named `init`. Slots without an explicit default are zero-valued (nil ref
 / 0 / false, per type) before `init` runs.
 
+A class has at most one base: the spec allows only single inheritance, so
+the header's parentheses hold one expression rather than an argument list.
+
+`this` and `super` have no grammar of their own: they are names the
+enclosing method binds (design syntax.md G4). `super` is the next more
+general method, so `super(1)` is an ordinary call and `f := super` a
+capture.
+
 ## 7. Expressions
 
 No `new` keyword: `MyClass(args)` is ordinary `call_op` on a class value
@@ -136,10 +146,16 @@ literal - because the spec shows `defer on error | nil:` as legal:
 `error` there is just the ordinary built-in `error` type flowing through
 the normal `type_constraint` rule, not a second reserved word.
 
-`catch_expr`'s handler is a plain `or_expr`, not a special-cased
-`"return" , [ expression ] | or_expr` - `return` reaches through there
+`catch` binds tighter than `try` (design syntax.md G1): `try f() catch 0`
+is `try (f() catch 0)`, so the handler runs first and `try` returns only
+if the handler fails too. Under the opposite precedence the handler of
+every `try ... catch` was dead code. A handler is a full expression
+(`try_expr`), so `a catch b catch c` nests right, and `return` reaches it
 like any other primary, so `EXPR catch return OTHER` needs no dedicated
 grammar.
+
+`foo::$ast` is an ordinary `::` path (G7): the definition's tree is what
+name resolution finds for a `$ast` segment, and no `$` name is reserved.
 
 `target`'s trailing `{ "[" , expression , "]" }` suffixes are how
 `arr[i] = x` / `grid[i][j] = x` mutate in place rather than only ever

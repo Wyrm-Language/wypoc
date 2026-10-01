@@ -200,17 +200,22 @@ class Class:
     also how an `init` inherited from a base class (no override in this
     class) falls out for free via the normal multi-dispatch machinery."""
 
-    def __init__(self, name, node: ast.ClassDef, closure: dict, bases: list):
+    def __init__(self, name, node: "ast.ClassDef | ast.ClassExpr", closure: dict, bases: list):
         self.name = name
         self.node = node
         self.closure = closure
         self.bases: list["Class"] = bases
         self.slots: dict = {}
+        self.virtual_slots: dict = {}
         self.signals: dict = {}
         self.methods: dict = {}
         self.coroutines: dict = {}
         for member in node.body:
-            if isinstance(member, ast.SlotDef):
+            if isinstance(member, ast.Pass):
+                continue
+            if isinstance(member, ast.SlotDef) and member.body is not None:
+                self.virtual_slots[member.name] = _virtual_slot(member, self.closure)
+            elif isinstance(member, ast.SlotDef):
                 self.slots[member.name] = member
             elif isinstance(member, ast.SignalDef):
                 self.signals[member.name] = member
@@ -230,6 +235,13 @@ class Class:
                 # not full encapsulation.
                 value = eval_expr(member.default, self.closure) if member.default is not None else None
                 bind_new(member.name, value, self.closure)
+            else:
+                raise TypeError(
+                    f"a class body holds slots, signals, statics and methods, "
+                    f"not a {type(member).__name__}"
+                )
+        # Whether attribute access must look for a getter/setter first.
+        self.has_virtual = bool(self.virtual_slots) or any(b.has_virtual for b in bases)
 
     def all_slots(self) -> dict:
         """(slot_def, owning_class) in MRO order - base classes first, so a
@@ -242,6 +254,15 @@ class Class:
             result.update(base.all_slots())
         for name, slot_def in self.slots.items():
             result[name] = (slot_def, self)
+        return result
+
+    def all_virtual_slots(self) -> dict:
+        """(name -> VirtualSlot) in MRO order, base classes first - the
+        virtual-slot counterpart of all_slots()."""
+        result: dict = {}
+        for base in self.bases:
+            result.update(base.all_virtual_slots())
+        result.update(self.virtual_slots)
         return result
 
     def all_signals(self) -> dict:
@@ -260,7 +281,57 @@ class Class:
         return f"Class({self.name!r}{f'({bases})' if bases else ''})"
 
     def __str__(self):
-        return f"<class {self.name}>"
+        return f"<class {self.name}>" if self.name else "<class>"
+
+
+class VirtualSlot:
+    """A slot with a subscope block instead of storage (design syntax.md
+    G3): reading it calls `getter`, writing it calls `setter`. A missing
+    getter makes it write-only, a missing setter read-only."""
+
+    def __init__(self, name: str, getter, setter):
+        self.name = name
+        self.getter = getter
+        self.setter = setter
+
+    def __repr__(self):
+        return f"VirtualSlot({self.name!r})"
+
+
+def _virtual_slot(slot_def: "ast.SlotDef", closure: dict) -> VirtualSlot:
+    """Runs a virtual slot's block once, in a subscope of the class's
+    closure, and picks `getter`/`setter` out of it. The block's other
+    bindings stay in the subscope, where the two functions close over them.
+    What the block may contain is checked here (G3-c): at most those two
+    functions, plus local bindings."""
+    if slot_def.default is not None:
+        raise TypeError(f"virtual slot {slot_def.name!r} can't have a default")
+    scope = closure.child()
+    for stmt in slot_def.body:
+        if isinstance(stmt, ast.FnDef):
+            if stmt.name not in ("getter", "setter") or stmt.class_target is not None:
+                raise TypeError(
+                    f"virtual slot {slot_def.name!r}: only `fn getter` and `fn setter` "
+                    f"may be defined in its block (found {stmt.name!r})"
+                )
+        elif not isinstance(stmt, (ast.VarDecl, ast.StaticDecl, ast.Pass)):
+            raise TypeError(
+                f"virtual slot {slot_def.name!r}: its block holds `fn getter`, "
+                f"`fn setter` and local bindings, not a {type(stmt).__name__}"
+            )
+        eval_stmt(stmt, scope)
+    getter, setter = (unwrap(scope.get(name)) if scope.declared_here(name) else None
+                      for name in ("getter", "setter"))
+    return VirtualSlot(slot_def.name, getter, setter)
+
+
+def _call_accessor(fn: "Function", instance: "ClassInstance", positional: list):
+    """Calls a virtual slot's getter/setter with `this` bound to
+    `instance`, the way a method body sees it."""
+    scope = fn.closure.child()
+    scope.update(instance.attrs)
+    bind_new("this", instance, scope)
+    return call_function(Function(fn.name, fn.node, scope), positional, {})
 
 
 # The built-in `error` type, as a real Class so `class Foo(error) {}`
@@ -273,7 +344,7 @@ class Class:
 # wyrm_builtins.py) recognizes both via class-ancestry.
 ERROR_CLASS = Class(
     "error",
-    ast.ClassDef("error", [], [ast.SlotDef("what", None, None, None)]),
+    ast.ClassDef("error", None, [ast.SlotDef("what", None, None, None)]),
     {},
     [],
 )
@@ -289,7 +360,7 @@ ERROR_CLASS = Class(
 # practice and the identity in effect.
 TREE_BASE_CLASS = Class(
     "TreeBase",
-    ast.ClassDef("TreeBase", [], [ast.SlotDef("__tree", None, None, None)]),
+    ast.ClassDef("TreeBase", None, [ast.SlotDef("__tree", None, None, None)]),
     {},
     [],
 )
@@ -678,10 +749,11 @@ class MethodOverload:
     dispatch position; None means "empty type" / wildcard, matching any
     receiver there) plus the fn body and the scope it closes over."""
 
-    def __init__(self, signature: tuple, node, closure: dict):
+    def __init__(self, signature: tuple, node, closure: dict, method: "Method | None" = None):
         self.signature = signature
         self.node = node
         self.closure = closure
+        self.method = method
 
     def __repr__(self):
         sig = ", ".join(c.name if c is not None else "*" for c in self.signature)
@@ -705,12 +777,42 @@ class Method:
     def add_overload(self, signature: tuple, node, closure: dict) -> None:
         for i, existing in enumerate(self.overloads):
             if existing.signature == signature:
-                self.overloads[i] = MethodOverload(signature, node, closure)
+                self.overloads[i] = MethodOverload(signature, node, closure, self)
                 return
-        self.overloads.append(MethodOverload(signature, node, closure))
+        self.overloads.append(MethodOverload(signature, node, closure, self))
 
     def __repr__(self):
         return f"Method({self.name!r}, {len(self.overloads)} overload(s))"
+
+
+class NextMethod:
+    """What `super` is bound to inside a method (design syntax.md G4): the
+    next more general overload of the same message for the same receivers,
+    like CLOS `call-next-method`. Resolved when called, not when bound, so
+    a method that never calls `super` pays only for this small object."""
+
+    __slots__ = ("overload", "receivers")
+
+    def __init__(self, overload: "MethodOverload", receivers: list):
+        self.overload = overload
+        self.receivers = receivers
+
+    def __call__(self, *positional, **kwargs):
+        method = self.overload.method
+        ranked = _ranked_overloads(method, self.receivers) if method is not None else []
+        following = [ov for _, ov in ranked]
+        try:
+            nxt = following[following.index(self.overload) + 1]
+        except (ValueError, IndexError):
+            name = method.name if method is not None else "?"
+            raise TypeError(f"super: {name!r} has no more general method") from None
+        return call_overload(nxt, self.receivers, list(positional), kwargs)
+
+    def __repr__(self):
+        return f"NextMethod({self.overload!r})"
+
+    def __str__(self):
+        return "<super>"
 
 
 class _AmbiguousMessage:
@@ -1269,7 +1371,11 @@ class ReturnSignal(Exception):
 
 
 class BreakSignal(Exception):
-    """Unwinds a loop body back to the nearest enclosing while/for on `break`."""
+    """Unwinds a loop body back to the nearest enclosing while/for on
+    `break`, carrying `break x`'s value (the loop's value)."""
+
+    def __init__(self, value=None):
+        self.value = value
 
 
 class ContinueSignal(Exception):
@@ -1464,7 +1570,7 @@ def _unescape(body: str) -> str:
 def eval_string_literal(text: str) -> str:
     """Strip a Str node's raw token text down to its Python value."""
     if text.startswith('"""'):
-        return _unescape(text[3:-2])
+        return _unescape(text[3:-3])
     if text[:1] in ("R", "r") and '"' in text:
         # Raw string: R"(...)"  or  R"tag(...)tag"
         open_paren = text.index("(")
@@ -1868,10 +1974,6 @@ def _expr_name(node, ctx):
     return lookup(node.id, ctx)
 
 
-def _expr_thisref(node, ctx):
-    return lookup("this", ctx)
-
-
 def _expr_symbol(node, ctx):
     return wyrm_builtins.Symbol(node.name)
 
@@ -1900,15 +2002,13 @@ def _expr_lambda(node, ctx):
     return Function(None, node, ctx)
 
 
+def _expr_colambda(node, ctx):
+    return Coroutine(None, node, ctx)
+
+
 def _expr_threadspawn(node, ctx):
     from wypoc.wyrm_remote import spawn_module_process
     return spawn_module_process(node.path)
-
-
-def _expr_defined(node, ctx):
-    if not isinstance(node.symbol, ast.Symbol):
-        raise TypeError("defined() takes a symbol literal, e.g. defined('foo)")
-    return is_defined(node.symbol.name, ctx)
 
 
 def _expr_binop(node, ctx):
@@ -1949,6 +2049,11 @@ def attr_value(obj, name: str):
             return wyrm_builtins.error(f"coroutine {obj.node.name!r} has not finished")
         return obj._result
     if isinstance(obj, ClassInstance):
+        virtual = obj.cls.all_virtual_slots().get(name) if obj.cls.has_virtual else None
+        if virtual is not None:
+            if virtual.getter is None:
+                return wyrm_builtins.error(f"slot {name!r} is write-only")
+            return _call_accessor(virtual.getter, obj, [])
         return lookup(name, obj.attrs)
     from wypoc.wyrm_remote import RemoteModule
     if isinstance(obj, RemoteModule):
@@ -1960,6 +2065,12 @@ def set_attr(obj, name: str, value) -> None:
     """`obj.name = value`, given values - the write half of `attr_value`."""
     if not isinstance(obj, ClassInstance):
         raise TypeError(f"'.' assignment is only supported on class instances right now (got {type(obj).__name__})")
+    virtual = obj.cls.all_virtual_slots().get(name) if obj.cls.has_virtual else None
+    if virtual is not None:
+        if virtual.setter is None:
+            raise TypeError(f"slot {name!r} is read-only")
+        _call_accessor(virtual.setter, obj, [value])
+        return
     bind(name, value, obj.attrs)
 
 
@@ -2101,24 +2212,48 @@ def _expr_unaryop(node, ctx):
     raise NotImplementedError(f"unsupported unary op: {node.op}")
 
 
-def _expr_astref(node, ctx):
-    target = yield from _eval_expr_gen(node.obj, ctx)
+def definition_tree(target):
+    """`name::$ast` - the tree of the definition `target` (the value `name`
+    evaluated to) was made from (design syntax.md G7). Reached through the
+    binding rather than through a separate name-to-tree table, which is
+    what makes it describe the definition *after* decoration: a decorated
+    `fn` binds what the decorator answered, so that is the tree found here.
+    It also means `foo = other` leaves the answer describing `other`, the
+    documented "describes the definition, not the binding" caveat seen
+    from this side. An `annotate` wrapper never reaches a binding (see
+    eval_stmt's Annotate case), so the tree is already without one."""
     definition = getattr(target, "node", None)
-    if definition is None:
+    if not isinstance(definition, ast.Node):
         raise TypeError(
-            f"'::${node.field}' needs a fn, co or class definition "
-            f"(got {type(target).__name__})"
+            f"'::$ast' needs a fn, co or class definition (got {type(target).__name__})"
         )
     return tree_box(definition)
 
 
+def scope_value(obj, name: str):
+    """`obj::name`, given the value `obj` evaluated to."""
+    if name == "$ast":
+        return definition_tree(obj)
+    if isinstance(obj, Module):
+        if name in obj.submodules:
+            return obj.submodules[name]
+        return lookup(name, obj.ctx)
+    raise NotImplementedError(f"'::' is only supported on modules right now (got {type(obj).__name__})")
+
+
 def _expr_scope(node, ctx):
     obj = yield from _eval_expr_gen(node.obj, ctx)
-    if isinstance(obj, Module):
-        if node.name in obj.submodules:
-            return obj.submodules[node.name]
-        return lookup(node.name, obj.ctx)
-    raise NotImplementedError(f"'::' is only supported on modules right now (got {type(obj).__name__})")
+    return scope_value(obj, node.name)
+
+
+def _expr_classexpr(node, ctx):
+    return make_class(None, node, ctx)
+    yield  # pragma: no cover - makes this a generator like its neighbours
+
+
+def _expr_annotate(node, ctx):
+    value = yield from _eval_expr_gen(node.target, ctx)
+    return value
 
 
 def _expr_messagetupleexpr(node, ctx):
@@ -2182,7 +2317,6 @@ def _expr_try(node, ctx):
 
 _EXPR_SIMPLE_HANDLERS = {
     ast.Name: _expr_name,
-    ast.ThisRef: _expr_thisref,
     ast.Symbol: _expr_symbol,
     ast.Num: _expr_num,
     ast.Str: _expr_str,
@@ -2190,8 +2324,8 @@ _EXPR_SIMPLE_HANDLERS = {
     ast.Bool: _expr_bool,
     ast.EllipsisExpr: _expr_ellipsis,
     ast.Lambda: _expr_lambda,
+    ast.CoLambda: _expr_colambda,
     ast.ThreadSpawn: _expr_threadspawn,
-    ast.Defined: _expr_defined,
 }
 
 _EXPR_GEN_HANDLERS = {
@@ -2210,8 +2344,9 @@ _EXPR_GEN_HANDLERS = {
     ast.Dict: _expr_dict,
     ast.Pair: _expr_pair,
     ast.UnaryOp: _expr_unaryop,
-    ast.AstRef: _expr_astref,
     ast.Scope: _expr_scope,
+    ast.ClassExpr: _expr_classexpr,
+    ast.Annotate: _expr_annotate,
     ast.MessageTupleExpr: _expr_messagetupleexpr,
     ast.TaskSpawn: _expr_taskspawn,
     ast.SetIfUnset: _expr_setifunset,
@@ -2394,8 +2529,8 @@ def _eval_stmt_impl_gen(stmt, ctx: dict):
                 yield from _run_block_gen(stmt.body, ctx)
             except ContinueSignal:
                 continue
-            except BreakSignal:
-                break
+            except BreakSignal as brk:
+                return brk.value
         return
     if isinstance(stmt, ast.For):
         # The loop variable is itself a declaration, fresh per iteration and
@@ -2407,6 +2542,7 @@ def _eval_stmt_impl_gen(stmt, ctx: dict):
         # body fires at the end of that iteration (see run_scoped_block).
         iterable = yield from _eval_expr_gen(stmt.iter, ctx)
         broke = False
+        result = None
         last_iter_scope = None
         for item in _iter_values(iterable, ctx):
             iter_scope = ctx.child()
@@ -2416,25 +2552,16 @@ def _eval_stmt_impl_gen(stmt, ctx: dict):
                 yield from _run_scoped_block_gen(stmt.body, iter_scope)
             except ContinueSignal:
                 continue
-            except BreakSignal:
+            except BreakSignal as brk:
                 broke = True
+                result = brk.value
                 break
         if not broke and stmt.orelse is not None:
             else_scope = last_iter_scope.child() if last_iter_scope is not None else ctx.child()
             if last_iter_scope is None:
                 else_scope.declare_new(stmt.var, UNSET)
             yield from _run_scoped_block_gen(stmt.orelse, else_scope)
-        return
-    if isinstance(stmt, (ast.WithSimple, ast.WithBlock)):
-        # `with` declares an immutable binding in the current scope - see
-        # doc/language-spec.md's "immutable bindings". `with_block` is
-        # sugar for several `with_stmt_simple`s in a row.
-        bindings = [stmt] if isinstance(stmt, ast.WithSimple) else stmt.bindings
-        for binding in bindings:
-            value = yield from _eval_expr_gen(binding.value, ctx)
-            cell = ctx.declare_new(binding.name, value)
-            cell.immutable = True
-        return
+        return result if broke else None
     if isinstance(stmt, ast.Decorated):
         expanded = expand_decorated(stmt, ctx, as_statement=True)
         value = yield from _eval_stmt_gen(expanded, ctx)
@@ -2478,8 +2605,8 @@ def _eval_stmt_gen(stmt, ctx: dict):
 # scope) since what it expands to isn't known without running the
 # decorator.
 _SCOPE_REQUIRING_STMT_TYPES = (
-    ast.VarDecl, ast.WithSimple, ast.WithBlock, ast.StaticDecl, ast.Defer,
-    ast.Decorated,
+    ast.VarDecl, ast.StaticDecl, ast.Defer, ast.Decorated, ast.Annotate,
+    ast.SlotDef,
 )
 
 # Keyed by id(body) - safe because every `body` this is ever called with is
@@ -2586,6 +2713,7 @@ def _make_overload_activation(overload: MethodOverload, receivers: list, positio
     if len(receivers) == 1 and isinstance(receivers[0], ClassInstance):
         local_ctx.update(receivers[0].attrs)
     bind_new("this", this_value, local_ctx)
+    bind_new("super", NextMethod(overload, receivers), local_ctx)
     return _build_call_activation(overload.node, local_ctx, positional, kwargs, overload.node.name)
 
 
@@ -2824,6 +2952,23 @@ def resolve_overload(method: "Method", receivers: list) -> MethodOverload:
     with a wildcard position always losing to any real-class match there
     (see MethodOverload/Method docstrings) - Python's own tuple comparison
     already implements exactly that positional tie-breaking order."""
+    ranked = _ranked_overloads(method, receivers)
+    if not ranked:
+        shapes = ", ".join(f"[{len(ov.signature)}]" for ov in method.overloads)
+        raise TypeError(
+            f"no overload of {method.name!r} matches {len(receivers)} receiver(s) "
+            f"(known overload arities: {shapes or 'none'})"
+        )
+    best_distances, best = ranked[0]
+    ties = [ov for distances, ov in ranked if distances == best_distances]
+    if len(ties) > 1:
+        raise TypeError(f"ambiguous overload for {method.name!r}: {len(ties)} equally-specific matches")
+    return best
+
+
+def _ranked_overloads(method: "Method", receivers: list) -> list:
+    """Every overload applicable to `receivers`, as (distances, overload),
+    most specific first - see resolve_overload."""
     n = len(receivers)
     ranked = []
     for ov in method.overloads:
@@ -2843,18 +2988,8 @@ def resolve_overload(method: "Method", receivers: list) -> MethodOverload:
             distances.append(d)
         if ok:
             ranked.append((tuple(distances), ov))
-    if not ranked:
-        shapes = ", ".join(f"[{len(ov.signature)}]" for ov in method.overloads)
-        raise TypeError(
-            f"no overload of {method.name!r} matches {n} receiver(s) "
-            f"(known overload arities: {shapes or 'none'})"
-        )
     ranked.sort(key=lambda pair: pair[0])
-    best_distances, best = ranked[0]
-    ties = [ov for distances, ov in ranked if distances == best_distances]
-    if len(ties) > 1:
-        raise TypeError(f"ambiguous overload for {method.name!r}: {len(ties)} equally-specific matches")
-    return best
+    return ranked
 
 
 _WILDCARD_DISTANCE = float("inf")
@@ -3060,50 +3195,6 @@ def macroexpand_value(ctx: dict, value):
     return tree_box(_fully_expanded(node, ctx))
 
 
-def expand_decorators(program: ast.Program, ctx: dict) -> ast.Program:
-    """`program`, with every `Decorated` node it contains - at any depth,
-    statement or expression position - replaced by what it fully expands to
-    (see expand_decorated). This is wys.py's "decorators run at compile
-    time" pass: a file it writes must carry no `'decorator`/`'decorated`
-    node, since it's meant to be readable by a host with no decorator
-    machinery at all.
-
-    A top-level `import`/`from-import` is executed for real, in the order it
-    appears, so a `static` decorator module has actually run - and its
-    messages are reachable - by the time a decorator after it expands,
-    exactly as running the program normally would arrange (see
-    expand_decorated's NameError case). Nothing else at the top level, or
-    nested within it, is executed - only walked, looking for `Decorated`
-    nodes to expand - so a decorator inside a function body that's never
-    called this way still expands (unlike the interpreter's own lazy,
-    first-call expansion), while the function's own side effects don't run
-    at compile time. `ctx` should already have whatever populate_globals
-    provides."""
-    for i, stmt in enumerate(program.body):
-        if isinstance(stmt, (ast.Import, ast.FromImport)):
-            eval_stmt(stmt, ctx)
-        else:
-            program.body[i] = _expand_decorators_in(stmt, ctx)
-    return program
-
-
-def _expand_decorators_in(node, ctx: dict):
-    if isinstance(node, ast.Decorated):
-        return _expand_decorators_in(_fully_expanded(node, ctx), ctx)
-    if isinstance(node, ast.Node):
-        for f in _dc_fields(node):
-            if ast._is_pos_field(f.name):
-                continue
-            value = getattr(node, f.name)
-            if isinstance(value, ast.Node):
-                setattr(node, f.name, _expand_decorators_in(value, ctx))
-            elif isinstance(value, list):
-                for i, item in enumerate(value):
-                    if isinstance(item, ast.Node):
-                        value[i] = _expand_decorators_in(item, ctx)
-    return node
-
-
 def register_native_method(name: str, fn, ctx: dict, arity: int = 1) -> None:
     """Registers `fn` (a plain Python callable) as a wildcard message
     overload under `name`, so it's callable via `recv ! name(...)` even
@@ -3190,7 +3281,7 @@ def _zero_value(type_expr: "ast.TypeExpr | None"):
     everything else (float, GC types, or no type hint at all) -> nil
     (Python None throughout this POC - see e.g. instantiate's old
     no-default branch, or an unset variable's value elsewhere)."""
-    if type_expr is None or not type_expr.parts:
+    if not isinstance(type_expr, ast.TypeExpr) or not type_expr.parts:
         return None
     name = type_expr.parts[-1]
     if name == "bool":
@@ -3257,16 +3348,6 @@ class DecoratorError(Exception):
     useful of the two."""
 
 
-# What may come back in statement position. An expression coming back there
-# is wrapped in an ExprStmt (a decorator answering `1 + 1` for a statement
-# means the statement `1 + 1`); a statement coming back in *expression*
-# position has nowhere to go and is an error instead.
-_STATEMENT_NODES = (
-    ast.ExprStmt, ast.VarDecl, ast.Assign, ast.StaticDecl, ast.If, ast.While,
-    ast.For, ast.Break, ast.Continue, ast.Return, ast.Pass, ast.WithBlock,
-    ast.WithSimple, ast.Defer, ast.FnDef, ast.CoDef, ast.ClassDef,
-    ast.Import, ast.FromImport,
-)
 
 
 def _decorated_is_statement(node: ast.Decorated) -> bool:
@@ -3275,10 +3356,7 @@ def _decorated_is_statement(node: ast.Decorated) -> bool:
     layers) `inner` - the same thing a node's position in the parsed tree
     already fixes, so this just reads it back off the tree rather than
     tracking it separately."""
-    inner = node.inner
-    while isinstance(inner, ast.Decorated):
-        inner = inner.inner
-    return isinstance(inner, _STATEMENT_NODES)
+    return sexpr.is_statement(node.inner)
 
 
 def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
@@ -3337,7 +3415,7 @@ def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
     # the next time they reach it, same as any other `Decorated` node.
     if isinstance(result, ast.Decorated):
         pass
-    elif isinstance(result, _STATEMENT_NODES):
+    elif sexpr.is_statement(result):
         if not as_statement:
             raise _decorator_error(
                 decorator,
@@ -3375,23 +3453,12 @@ def _decorator_identity(this, *args, **kwargs):
     return sexpr.encode(lookup(_TREE_SLOT, this.attrs))
 
 
-def _decorator_template(this, *args, **kwargs):
-    """`@template X` - the predefined decorator marking X as a template (a
-    tree written to be quoted, whose code may never run; see the epic 10a
-    plan). This POC ignores the marking: it already compiles a body that will
-    not lower to a trapping stub (`stub_unlowered`), and `foo::$ast` already
-    answers for any definition, so the decorator answers X unchanged. It is
-    registered as an ordinary TreeBase message, so a user-defined `template`
-    shadows it like any other decorator. Arguments are accepted and ignored."""
-    return sexpr.encode(lookup(_TREE_SLOT, this.attrs))
-
-
 def install_native_decorators(ctx: dict) -> None:
-    """Registers `@__dump`/`@__identity`/`@template` as TreeBase messages.
-    Typed on TreeBase rather than registered as wildcards
-    (register_native_method) so they only ever answer for a tree."""
-    for name, fn in (("__dump", _decorator_dump), ("__identity", _decorator_identity),
-                     ("template", _decorator_template)):
+    """Registers `@__dump`/`@__identity` as TreeBase messages. Typed on
+    TreeBase rather than registered as wildcards (register_native_method)
+    so they only ever answer for a tree. `@template` is a library decorator
+    now (corelib/wyrm/template.wy, design syntax.md G7), not a built-in."""
+    for name, fn in (("__dump", _decorator_dump), ("__identity", _decorator_identity)):
         register_overload(name, (TREE_BASE_CLASS,), NativeBody(fn), {}, ctx)
 
 
@@ -3475,11 +3542,9 @@ def _resolve_target_value(target, ctx: dict):
     if isinstance(target, ast.NameTarget):
         return lookup(target.name, ctx)
     if isinstance(target, ast.AttrTarget):
-        obj = lookup("this", ctx) if isinstance(target.base, ast.ThisRef) else lookup(target.base, ctx)
+        obj = lookup(target.base, ctx)
         for name in target.attrs:
-            if not isinstance(obj, ClassInstance):
-                raise TypeError(f"'.' access is only supported on class instances right now (got {type(obj).__name__})")
-            obj = lookup(name, obj.attrs)
+            obj = attr_value(obj, name)
         return obj
     if isinstance(target, ast.IndexTarget):
         obj = _resolve_target_value(target.base, ctx)
@@ -3502,15 +3567,13 @@ def assign_target(target, value, ctx: dict) -> None:
                 f"(declare it first with 'var' or ':=')"
             )
         if cell.immutable:
-            raise TypeError(f"cannot assign to {target.name!r}: bound with 'with' (immutable)")
+            raise TypeError(f"cannot assign to {target.name!r}: it is immutable")
         cell.value = value
         return
     if isinstance(target, ast.AttrTarget):
-        obj = lookup("this", ctx) if isinstance(target.base, ast.ThisRef) else lookup(target.base, ctx)
+        obj = lookup(target.base, ctx)
         for name in target.attrs[:-1]:
-            if not isinstance(obj, ClassInstance):
-                raise TypeError(f"'.' assignment is only supported on class instances right now (got {type(obj).__name__})")
-            obj = lookup(name, obj.attrs)
+            obj = attr_value(obj, name)
         set_attr(obj, target.attrs[-1], value)
         return
     if isinstance(target, ast.IndexTarget):
@@ -3622,23 +3685,12 @@ def eval_expr(node, ctx: dict):
         return call_value(func, positional, kwargs)
     if isinstance(node, ast.Decorated):
         return eval_expr(expand_decorated(node, ctx, as_statement=False), ctx)
-    if isinstance(node, ast.AstRef):
-        # `foo::$ast` - the tree of the definition `foo` names. Reached
-        # through the binding rather than through a separate name-to-tree
-        # table, which is what makes it describe the definition *after*
-        # decoration: a decorated `fn` binds what the decorator answered, so
-        # that is the tree found here. It also means `foo = other` leaves
-        # the answer describing `other`, which is the documented
-        # "describes the definition, not the binding" caveat seen from this
-        # side.
-        target = eval_expr(node.obj, ctx)
-        definition = getattr(target, "node", None)
-        if definition is None:
-            raise TypeError(
-                f"'::${node.field}' needs a fn, co or class definition "
-                f"(got {type(target).__name__})"
-            )
-        return tree_box(definition)
+    if isinstance(node, ast.CoLambda):
+        return Coroutine(None, node, ctx)
+    if isinstance(node, ast.ClassExpr):
+        return make_class(None, node, ctx)
+    if isinstance(node, ast.Annotate):
+        return eval_expr(node.target, ctx)
     if isinstance(node, ast.Index):
         obj = eval_expr(node.obj, ctx)
         idx = eval_expr(node.index, ctx)
@@ -3671,27 +3723,9 @@ def eval_expr(node, ctx: dict):
         except (IndexError, TypeError, KeyError) as exc:
             return wyrm_builtins.error(str(exc))
     if isinstance(node, ast.Scope):
-        obj = eval_expr(node.obj, ctx)
-        if isinstance(obj, Module):
-            if node.name in obj.submodules:
-                return obj.submodules[node.name]
-            return lookup(node.name, obj.ctx)
-        raise NotImplementedError(f"'::' is only supported on modules right now (got {type(obj).__name__})")
+        return scope_value(eval_expr(node.obj, ctx), node.name)
     if isinstance(node, ast.Attr):
-        obj = eval_expr(node.obj, ctx)
-        if isinstance(obj, CoroutineInstance) and node.name == "value":
-            # "The return statement from a coroutine is stored in the
-            # 'value' attribute. An active coroutine will return an error
-            # when accessing [it]" - doc/language-spec.md's Coroutines.
-            if not obj._finished:
-                return wyrm_builtins.error(f"coroutine {obj.node.name!r} has not finished")
-            return obj._result
-        if isinstance(obj, ClassInstance):
-            return lookup(node.name, obj.attrs)
-        from wypoc.wyrm_remote import RemoteModule
-        if isinstance(obj, RemoteModule):
-            return obj.signal(node.name)
-        raise NotImplementedError(f"'.' is only supported on class instances right now (got {type(obj).__name__})")
+        return attr_value(eval_expr(node.obj, ctx), node.name)
     if isinstance(node, ast.Message):
         receiver = eval_expr(node.obj, ctx)
         from wypoc.wyrm_remote import RemoteModule
@@ -3714,12 +3748,6 @@ def eval_expr(node, ctx: dict):
         finally:
             _pop_task_future()
         return future
-    if isinstance(node, ast.ThisRef):
-        return lookup("this", ctx)
-    if isinstance(node, ast.Defined):
-        if not isinstance(node.symbol, ast.Symbol):
-            raise TypeError("defined() takes a symbol literal, e.g. defined('foo)")
-        return is_defined(node.symbol.name, ctx)
     if isinstance(node, ast.SetIfUnset):
         if isinstance(node.target, ast.Name):
             # `?=` operates on an already-declared variable (typically a
@@ -3826,11 +3854,9 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
     if isinstance(stmt, ast.Import):
         eval_import(stmt, ctx)
         return
-    if isinstance(stmt, ast.FromImport):
-        mod = import_module(stmt.path)
-        for name in stmt.names:
-            bind_new(name, lookup(name, mod.ctx), ctx)
-        return
+    if isinstance(stmt, ast.Annotate):
+        # Metadata for a compiler; evaluating it is evaluating its target.
+        return eval_stmt(stmt.target, ctx)
     if isinstance(stmt, ast.VarDecl):
         # `var`, and the `:=` shorthand (see actions.make_assignment_stmt) -
         # always declares fresh name(s) in the *current* scope; error if any
@@ -3928,7 +3954,7 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
     if isinstance(stmt, ast.Continue):
         raise ContinueSignal()
     if isinstance(stmt, ast.Break):
-        raise BreakSignal()
+        raise BreakSignal(eval_expr(stmt.value, ctx) if stmt.value is not None else None)
     if isinstance(stmt, ast.While):
         # A fresh child scope per iteration, matching `for`'s per-iteration
         # scoping below - a `var`/`:=` local declared in the body doesn't
@@ -3940,8 +3966,8 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
                 _run_block(stmt.body, ctx)
             except ContinueSignal:
                 continue
-            except BreakSignal:
-                break
+            except BreakSignal as brk:
+                return brk.value
         return
     if isinstance(stmt, ast.For):
         # The loop variable is itself a declaration, fresh per iteration and
@@ -3952,6 +3978,7 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
         # see doc/language-spec.md's "for" section. A `defer` inside the
         # body fires at the end of that iteration (see run_scoped_block).
         broke = False
+        result = None
         last_iter_scope = None
         for item in _iter_values(eval_expr(stmt.iter, ctx), ctx):
             iter_scope = ctx.child()
@@ -3961,8 +3988,9 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
                 run_scoped_block(stmt.body, iter_scope)
             except ContinueSignal:
                 continue
-            except BreakSignal:
+            except BreakSignal as brk:
                 broke = True
+                result = brk.value
                 break
         if not broke and stmt.orelse is not None:
             # The loop variable stays visible (bound to the final
@@ -3972,23 +4000,14 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
             if last_iter_scope is None:
                 else_scope.declare_new(stmt.var, UNSET)
             run_scoped_block(stmt.orelse, else_scope)
-        return
+        return result if broke else None
     if isinstance(stmt, ast.Defer):
         # Registers a deferred body against the *current* scope - run when
         # that scope is torn down (see run_scoped_block), in LIFO order
         # relative to other defers in the same scope. `defer on error` only
         # runs if the scope is exiting via a `return`ed error value or an
         # escaping exception - see doc/language-spec.md's Defer section.
-        ctx.defers.append((stmt.on_error, stmt.body))
-        return
-    if isinstance(stmt, (ast.WithSimple, ast.WithBlock)):
-        # `with` declares an immutable binding in the current scope - see
-        # doc/language-spec.md's "immutable bindings". `with_block` is
-        # sugar for several `with_stmt_simple`s in a row.
-        bindings = [stmt] if isinstance(stmt, ast.WithSimple) else stmt.bindings
-        for binding in bindings:
-            cell = ctx.declare_new(binding.name, eval_expr(binding.value, ctx))
-            cell.immutable = True
+        ctx.defers.append((stmt.on is not None, stmt.body))
         return
     if isinstance(stmt, ast.FnDef):
         if stmt.class_target is None:
@@ -4027,19 +4046,15 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
             register_overload(stmt.name, signature, stmt, ctx, ctx)
         return
     if isinstance(stmt, ast.ClassDef):
-        bases = [eval_expr(b, ctx) for b in stmt.bases]
-        for base, base_expr in zip(bases, stmt.bases):
-            if not isinstance(base, Class):
-                raise TypeError(f"base class {base_expr!r} does not name a class (got {base!r})")
-        cls = Class(stmt.name, stmt, ctx, bases)
-        bind(stmt.name, cls, ctx)
-        # A class-body method/coroutine is equivalent to `fn`/`co`
-        # `[ThisClass] name(...)` defined externally - see
-        # doc/language-spec.md's Messages section.
-        for method_name, method_node in cls.methods.items():
-            register_overload(method_name, (cls,), method_node, cls.closure, ctx)
-        for co_name, co_node in cls.coroutines.items():
-            register_overload(co_name, (cls,), co_node, cls.closure, ctx)
+        bind(stmt.name, make_class(stmt.name, stmt, ctx), ctx)
+        return
+    if isinstance(stmt, ast.SlotDef):
+        # A module-level slot parses (design syntax.md G0/B6); what it
+        # means is a research item. Here it is a plain module variable.
+        if stmt.body is not None:
+            raise NotImplementedError("a virtual slot outside a class isn't supported")
+        value = eval_expr(stmt.default, ctx) if stmt.default is not None else _zero_value(stmt.type)
+        ctx.declare_new(stmt.name, value)
         return
     if isinstance(stmt, ast.Emit):
         sig = lookup(stmt.name, ctx)
@@ -4054,6 +4069,26 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
             call_value(callback, positional, kwargs)
         return
     raise NotImplementedError(f"cannot evaluate statement {type(stmt).__name__}")
+
+
+def make_class(name, node: "ast.ClassDef | ast.ClassExpr", ctx: dict) -> Class:
+    """A Class from a `class` definition or an anonymous `class(...)`
+    expression, with its methods registered in `ctx`'s message table."""
+    bases = []
+    if node.base is not None:
+        base = eval_expr(node.base, ctx)
+        if not isinstance(base, Class):
+            raise TypeError(f"base class {node.base!r} does not name a class (got {base!r})")
+        bases.append(base)
+    cls = Class(name, node, ctx, bases)
+    # A class-body method/coroutine is equivalent to `fn`/`co`
+    # `[ThisClass] name(...)` defined externally - see
+    # doc/language-spec.md's Messages section.
+    for method_name, method_node in cls.methods.items():
+        register_overload(method_name, (cls,), method_node, cls.closure, ctx)
+    for co_name, co_node in cls.coroutines.items():
+        register_overload(co_name, (cls,), co_node, cls.closure, ctx)
+    return cls
 
 
 def eval_block(stmts, ctx: dict) -> "object":
@@ -4114,6 +4149,46 @@ def run_scoped_block(body, scope: "Scope") -> "object":
         return value
 
 
+class CompileError(SyntaxError):
+    """A program that parses but isn't valid where it stands (design
+    syntax.md G0) - reported before any of it runs, with the location of
+    the offending name. `str()` is `line:col: message`, 1-based columns."""
+
+    def __str__(self):
+        return f"{self.lineno}:{self.offset}: {self.msg}"
+
+
+# Names a method binds implicitly (design syntax.md G4); nothing else may
+# declare or assign them, so inside a method they always mean its own.
+_METHOD_BOUND = frozenset({"this", "super"})
+
+
+def check_program(program: "ast.Program") -> None:
+    """The static checks a compiler would make before running `program`:
+    for now, that nothing declares or assigns `this` or `super`. Raises
+    CompileError at the first violation."""
+    for node in program.walk():
+        if isinstance(node, ast.VarDecl):
+            for target in node.targets:
+                _check_bound_name(target.name, target.name_pos or target.pos, "assigned")
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.NameTarget):
+                    _check_bound_name(target.name, target.name_pos or node.pos, "assigned")
+        elif isinstance(node, (ast.Param, ast.VarPositional, ast.VarKeyword,
+                               ast.StaticDecl, ast.SlotDef, ast.FnDef, ast.CoDef,
+                               ast.ClassDef)):
+            _check_bound_name(node.name, node.name_pos or node.pos, "declared")
+        elif isinstance(node, ast.For):
+            _check_bound_name(node.var, node.var_pos or node.pos, "declared")
+
+
+def _check_bound_name(name: str, pos, verb: str) -> None:
+    if name in _METHOD_BOUND:
+        line, col = (pos[0], pos[1] + 1) if pos else (0, 0)
+        raise CompileError(f"`{name}` can't be {verb}", ("<wyrm>", line, col, None))
+
+
 def eval_program(program: ast.Program, ctx: dict) -> dict:
     """Runs `program` in scope `ctx`, mutating it in place (returning the
     same object) - `ctx` may be an ordinary dict (e.g. a fresh `{}` from a
@@ -4121,6 +4196,7 @@ def eval_program(program: ast.Program, ctx: dict) -> dict:
     cli.py do): wrapped in a real root Scope for the run, then copied back
     so the caller's own object still reflects the resulting top-level
     bindings afterward."""
+    check_program(program)
     scope = ctx if isinstance(ctx, Scope) else Scope()
     if scope is not ctx:
         scope.update(ctx)
