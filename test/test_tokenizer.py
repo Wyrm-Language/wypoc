@@ -99,7 +99,49 @@ def test_shift_and_complement_operators_are_lexed(src, ops):
     assert [t for kind, t in _significant(src) if kind == token.OP] == ops
 
 
-@pytest.mark.parametrize("text", ["'<<", "'>>", "'~", "'$ast", "'::"])
+@pytest.mark.parametrize("text", ["'<<", "'>>", "'~", "'$ast"])
 def test_the_new_operators_and_dollar_names_can_be_symbols(text):
     toks = _string_tokens(text + "\n")
     assert len(toks) == 1 and toks[0].string == text
+
+
+# --------------------------------------------------------------------------
+# Symbol literals run to the first breaking character (design syntax.md G9).
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "'name", "'empty?", "'set!", "'foo-bar", "'<=>", "'->", "'**", "'$x",
+    "'1", "'a+b", "'fn", "'caf\u00e9",
+])
+def test_a_symbol_takes_every_non_breaking_character(text):
+    toks = _string_tokens(text + "\n")
+    assert len(toks) == 1 and toks[0].string == text
+
+
+@pytest.mark.parametrize("src,expected", [
+    ("'a, b\n", [(token.STRING, "'a"), (token.OP, ","), (token.NAME, "b")]),
+    ("'a b\n", [(token.STRING, "'a"), (token.NAME, "b")]),
+    ("'a.b\n", [(token.STRING, "'a"), (token.OP, "."), (token.NAME, "b")]),
+    ("'a:\n", [(token.STRING, "'a"), (token.OP, ":")]),
+    ("'mod::baz\n", [(token.STRING, "'mod"), (token.OP, "::"), (token.NAME, "baz")]),
+    ("$['a, 'b]\n", [(token.OP, "$"), (token.OP, "["), (token.STRING, "'a"),
+                     (token.OP, ","), (token.STRING, "'b"), (token.OP, "]")]),
+    ("f('a)\n", [(token.NAME, "f"), (token.OP, "("), (token.STRING, "'a"),
+                 (token.OP, ")")]),
+    ("{'a: 1}\n", [(token.OP, "{"), (token.STRING, "'a"), (token.OP, ":"),
+                   (token.NUMBER, "1"), (token.OP, "}")]),
+    ("'a#note\n", [(token.STRING, "'a")]),
+    ("'a;'b\n", [(token.STRING, "'a"), (token.STRING, "'b")]),  # `;` is a NEWLINE
+    ('\'a"s"\n', [(token.STRING, "'a"), (token.STRING, '"s"')]),
+])
+def test_a_breaking_character_ends_a_symbol(src, expected):
+    assert _significant(src) == expected
+
+
+@pytest.mark.parametrize("src", [
+    "'\n", "' a\n", "x = '\n", "'(a)\n", "'::\n", "'...\n", "''a\n",
+    "'\\#t\n", "'\ta\n",
+])
+def test_an_empty_symbol_is_an_error(src):
+    with pytest.raises(TokenizeError, match="empty symbol literal"):
+        list(generate_tokens(src))

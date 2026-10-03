@@ -3453,12 +3453,25 @@ def _decorator_identity(this, *args, **kwargs):
     return sexpr.encode(lookup(_TREE_SLOT, this.attrs))
 
 
+def _decorator_template(this, *args, **kwargs):
+    """`@template X` - marks X as a template, a definition written to be
+    quoted whose code may never run (design syntax.md G7). Answers
+    `(annotate template (true) X)`: metadata for a compiler, which lowers
+    the definition as usual and emits a trap in its place if lowering
+    fails. This interpreter never lowers anything, so the definition runs
+    as written, and `name::$ast` is its tree without the annotation."""
+    return sexpr.node("annotate", wyrm_builtins.Symbol("template"), sexpr.node("true"),
+                      sexpr.encode(lookup(_TREE_SLOT, this.attrs)))
+
+
 def install_native_decorators(ctx: dict) -> None:
-    """Registers `@__dump`/`@__identity` as TreeBase messages. Typed on
-    TreeBase rather than registered as wildcards (register_native_method)
-    so they only ever answer for a tree. `@template` is a library decorator
-    now (corelib/wyrm/template.wy, design syntax.md G7), not a built-in."""
-    for name, fn in (("__dump", _decorator_dump), ("__identity", _decorator_identity)):
+    """Registers the predefined decorators `@__dump`, `@__identity` and
+    `@template` as TreeBase messages. Typed on TreeBase rather than
+    registered as wildcards (register_native_method) so they only ever
+    answer for a tree. A module's own `fn [TreeBase] template()` shadows
+    the predefined one, like any other local definition."""
+    for name, fn in (("__dump", _decorator_dump), ("__identity", _decorator_identity),
+                     ("template", _decorator_template)):
         register_overload(name, (TREE_BASE_CLASS,), NativeBody(fn), {}, ctx)
 
 

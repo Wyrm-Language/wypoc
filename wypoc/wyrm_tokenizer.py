@@ -48,17 +48,12 @@ MULTI_OPS = sorted(
 
 SINGLE_OPS = set("()[]{}.,:+-*/%&|^~<>=!$'@")
 
-# The operators a symbol literal may name - `'+`, `'<=>`, `'::`, ... The
-# canonical s-expression format spells a binop's operator, and a qualified
-# name's `(:: a b c)`, as a symbol, so building a tree from scratch is
-# impossible without these (see doc/sexpr-spec.md's "Operators"). Longest
-# first, same maximal-munch rule MULTI_OPS uses.
-SYMBOL_OPERATORS = sorted(
-    ["<=>", "**", "==", "!=", "<=", ">=", "<<", ">>", "::",
-     "+", "-", "*", "/", "%",
-     "&", "|", "^", "~", "<", ">"],
-    key=len, reverse=True,
-)
+# The characters that end a symbol literal, besides whitespace and anything
+# non-printable (design syntax.md G9). Everything else may appear in one, so
+# `'empty?`, `'set!`, `'foo-bar` and `'<=>` are all symbols. `'` and `\` are
+# held back so an escape form can be added later; until then a symbol whose
+# name holds one of these is built with `sym(...)`, e.g. `sym("::")`.
+SYMBOL_BREAKS = frozenset(",;:.()[]{}\"#`'\\")
 
 OPEN_BRACKETS = "(["
 CLOSE_BRACKETS = ")]"
@@ -76,6 +71,10 @@ def _is_ident_cont(c: str) -> bool:
     # `$` is an ordinary identifier character (`$ast`, `reg$0`, `a$b`), and
     # no `$` name is reserved (design syntax.md G7).
     return c.isalnum() or c == "_" or c == "$"
+
+
+def _is_symbol_char(c: str) -> bool:
+    return c.isprintable() and not c.isspace() and c not in SYMBOL_BREAKS
 
 
 def _starts_name(line: str, i: int) -> bool:
@@ -214,14 +213,8 @@ class _Lexer:
                 yield self._scan_char(start)
                 continue
             if c == "'":
-                symbol = self._scan_symbol(start)
-                if symbol is not None:
-                    yield symbol
-                    continue
-                # A bare `'` naming neither a name nor an operator: fall
-                # through and emit it as the plain OP it lexically is, so
-                # the parser reports the syntax error at the right place
-                # rather than the tokenizer guessing at intent.
+                yield self._scan_symbol(start)
+                continue
             if (c == "R" or c == "r") and self.peekc(1) == '"':
                 yield self._scan_raw_string(start)
                 continue
@@ -355,10 +348,9 @@ class _Lexer:
         self.col = k
         return TokenInfo(token.STRING, text, start, (self.lineno + 1, k), line)
 
-    def _scan_symbol(self, start) -> "TokenInfo | None":
-        """A symbol literal: `'name`, or `'+`/`'<=>` naming an operator.
-        Returns None if the `'` names neither, leaving the caller to emit it
-        as a plain operator token.
+    def _scan_symbol(self, start) -> TokenInfo:
+        """A symbol literal: `'` and a run of characters up to the first
+        breaking one (see SYMBOL_BREAKS). An empty run is an error.
 
         Scanned as one token, rather than left to the parser as `'` + NAME,
         because a symbol's name may be a reserved word - `'fn`, `'return`,
@@ -371,18 +363,11 @@ class _Lexer:
         kind the vendored pegen generator would have to learn."""
         line = self.line
         i = self.col  # at the quote
-        j = i + 1
-        if j < len(line) and _starts_name(line, j):
-            k = j + 1
-            while k < len(line) and _is_ident_cont(line[k]):
-                k += 1
-        else:
-            for op in SYMBOL_OPERATORS:
-                if line.startswith(op, j):
-                    k = j + len(op)
-                    break
-            else:
-                return None
+        k = i + 1
+        while k < len(line) and _is_symbol_char(line[k]):
+            k += 1
+        if k == i + 1:
+            raise self.error("empty symbol literal")
         text = line[i:k]
         self.col = k
         return TokenInfo(token.STRING, text, start, (self.lineno + 1, k), line)

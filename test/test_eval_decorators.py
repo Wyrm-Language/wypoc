@@ -481,14 +481,13 @@ def test_samples_dir_is_where_the_conformance_script_lives():
 
 
 def test_template_annotates_the_definition_it_is_given():
-    """`@template` (corelib/wyrm/template.wy, design syntax.md G7) answers
+    """`@template` (predefined, design syntax.md G7) answers
     `(annotate template (true) <definition>)`. This interpreter never
     lowers anything, so the definition still binds and runs, and its
     `$ast` is the definition without the annotation."""
     from wypoc.wyrm_eval_parse_tree import call_value
 
     ctx = run(
-        "import wyrm::template::*\n"
         "@template\nfn f():\n    return 3\n"
         "head := car(sexpr(f::$ast))\n"
         "fn [TreeBase] peek():\n    return $['sym, car(sexpr(this))]\n"
@@ -499,9 +498,15 @@ def test_template_annotates_the_definition_it_is_given():
     assert ctx["seen"].value == wyrm_builtins.Symbol("annotate")
 
 
-def test_template_is_not_predefined():
-    with pytest.raises(DecoratorError):
-        run("@template\nfn f():\n    return 3\n")
+def test_importing_wyrm_template_is_still_accepted():
+    """corelib/wyrm/template.wy answers the same tree as the predefined
+    decorator, so code that still imports it is unchanged."""
+    ctx = run(
+        "import wyrm::template::*\n"
+        "fn [TreeBase] peek():\n    return $['sym, car(sexpr(this))]\n"
+        "seen := @peek @template 1\n"
+    )
+    assert ctx["seen"].value == wyrm_builtins.Symbol("annotate")
 
 
 def test_a_user_defined_template_decorator_is_an_ordinary_one():

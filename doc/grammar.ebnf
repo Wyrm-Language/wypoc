@@ -48,22 +48,20 @@ nil_literal     ::= "nil" ;
    when a letter follows it. *)
 identifier      ::= ( letter | "$" , letter ) , { letter | digit | "$" } ;
 
-symbol_literal  ::= "'" , ( identifier | operator_symbol ) ;
+symbol_literal  ::= "'" , symbol_char , { symbol_char } ;
                   (* At least 31 significant characters recognized.
                      A symbol's name may be a reserved word ('fn, 'return,
                      'if): they are node kinds in the canonical s-expression
                      format, so the literal is lexed whole rather than as
                      "'" followed by a name. *)
 
-(* An operator, written as a symbol. The s-expression format spells a
-   binop's operator, and a qualified name's head (:: a b c), as one, so a
-   tree cannot be built from scratch without these; nothing else in the
-   grammar puts an operator after a quote, so there is no ambiguity to
-   trade for it. *)
-operator_symbol ::= "+" | "-" | "*" | "/" | "%" | "**"
-                   | "&" | "|" | "^" | "~" | "<<" | ">>"
-                   | "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>"
-                   | "::" ;
+(* Any character except a breaking one (design syntax.md G9), so 'empty?,
+   'set!, 'foo-bar and operator names such as '+ and '<=> are all symbols.
+   A symbol whose name holds a breaking character, such as the :: head of
+   (:: a b c) or ..., is built with sym("::"). "'" and "\" are reserved for a later
+   escape form. A "'" followed by a breaking character is an error. *)
+symbol_char     ::= ? any printable, non-whitespace character except
+                      , ; : . ( ) [ ] { } " # ` ' \ ? ;
 
 ellipsis_literal
                 ::= "..." ;                (* the placeholder / template hole *)

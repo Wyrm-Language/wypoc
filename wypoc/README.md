@@ -307,12 +307,13 @@ after decoration.
 `foo::$ast` is an ordinary `::` path: no `$` name is reserved, and what makes
 `$ast` special is that `::` resolves it to the definition's tree.
 
-`@__dump X` (prints the tree, compiles `X` unchanged) and `@__identity X`
-(rebuilds `X` from its tree, so every use is a full round trip) are native,
-and need no import at all. `@template` is a library decorator,
-`import wyrm::template::*` (`corelib/wyrm/template.wy`): it answers
-`(annotate template (true) X)`, metadata for a compiler that this interpreter
-evaluates through.
+`@__dump X` (prints the tree, compiles `X` unchanged), `@__identity X`
+(rebuilds `X` from its tree, so every use is a full round trip) and
+`@template X` are native and predefined, so they need no import. `@template`
+answers `(annotate template (true) X)`, metadata for a compiler that this
+interpreter evaluates through. A module's own `fn [TreeBase] template()`
+shadows it. `corelib/wyrm/template.wy` is the same decorator in wyrm, kept so
+that `import wyrm::template::*` still works.
 
 `samples/decorators.wy` runs every node kind through `@__identity` and then
 through the wyrm-written decorators in `samples/decolib.wy`;

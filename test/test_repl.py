@@ -12,7 +12,7 @@ from wypoc.repl import Result, Session, is_incomplete, run_command
 @pytest.mark.parametrize("source", [
     "f(1,",                     # unclosed call
     "x = [1, 2",                # unclosed array
-    "x = '(1 . 2",              # unclosed pair list
+    "x = $[1, 2",               # unclosed pair list
     'x = "abc',                 # unterminated string
     "fn add(a, b):",            # block header, body still to come
     "if x:",

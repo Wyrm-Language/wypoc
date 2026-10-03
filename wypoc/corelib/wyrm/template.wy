@@ -1,7 +1,9 @@
 # `@template` - marks a definition written to be quoted (design syntax.md
 # G7): a tree whose code may never run, read through `name::$ast`.
 #
-#     import wyrm::template::*
+# `@template` is predefined (wyrm_eval_parse_tree's native decorators), so
+# no import is needed. This module is the same decorator written in wyrm,
+# kept so that `import wyrm::template::*` still works:
 #
 #     @template
 #     fn $tmpl(e):
