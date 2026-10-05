@@ -199,7 +199,7 @@ def test_dump_ast_prints_the_canonical_tree(tmp_path):
     r = run("--dump-ast", str(src))
     assert r.returncode == 0, f"stderr={r.stderr!r}"
     assert r.stdout == (
-        '(module (fn_def greet () ((name (type auto) ())) (type auto) '
+        '(module (fn_def greet () ((param name (type auto) ())) (type auto) '
         '(apply print (+ (str "hi ") name))) (apply greet (str "wyrm")))\n'
     )
 

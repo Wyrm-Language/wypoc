@@ -145,20 +145,21 @@ def test_dump_prints_the_tree_it_would_receive(output):
 def test_dump_shows_a_signature_with_its_types(output):
     dumped = [line for line in output if line.startswith("(fn_def typed")]
     assert dumped == [
-        "(fn_def typed () ((a (type int) ()) (b (type str nil) ()) "
-        "(c (type (:: shapes Circle)) ())) (type int) (return a))"
+        "(fn_def typed () ((param a (type int) ()) (param b (type str nil) ()) "
+        "(param c (type (:: shapes Circle)) ())) (type int) (return a))"
     ]
 
 
-def test_dump_shows_the_rest_parameter_as_a_marked_entry(output):
+def test_dump_shows_the_rest_parameter_as_a_spread_param(output):
     dumped = [line for line in output if line.startswith("(fn_def spread")]
     assert dumped == [
-        "(fn_def spread () ((a (type int) ()) (* others (type auto))) (type int) (return a))"
+        "(fn_def spread () ((param a (type int) ()) (spread_param others (type auto))) "
+        "(type int) (return a))"
     ]
 
 
 def test_dump_shows_an_unexpanded_inner_decorator(output):
-    assert ("(decorate __identity (fn_def nested () ((x (type auto) ())) "
+    assert ("(decorate __identity (fn_def nested () ((param x (type auto) ())) "
             "(type auto) (return x)))") in output
 
 

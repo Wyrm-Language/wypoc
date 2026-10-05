@@ -79,9 +79,9 @@ SHAPES = [
     ("x := try v catch 0", "(define x (type auto) (try (catch v (int 0))))"),
     ("x := v catch 0", "(define x (type auto) (catch v (int 0)))"),
     ("x := v catch return 0", "(define x (type auto) (catch v (return (int 0))))"),
-    ("x := fn(a): a", "(define x (type auto) (lambda ((a (type auto) ())) (type auto) a))"),
+    ("x := fn(a): a", "(define x (type auto) (lambda ((param a (type auto) ())) (type auto) a))"),
     ("x := co(<- int, a): yield a",
-     "(define x (type auto) (co_lambda ((a (type auto) ())) (type int) (type auto) (yield a)))"),
+     "(define x (type auto) (co_lambda ((param a (type auto) ())) (type int) (type auto) (yield a)))"),
     ("x := class(B) { slot a; }",
      "(define x (type auto) (class_expr B (slot_def a (type auto) () ())))"),
     ("x := @d(1) 3", "(define x (type auto) (decorate d (int 3) (int 1)))"),
@@ -143,11 +143,12 @@ MULTILINE = [
     ("defer", "defer:\n    pass\n", "(defer (pass))"),
     ("defer_on", "defer on error:\n    pass\n", "(defer_on (type error) (pass))"),
     ("fn", "fn [A, B] m(a: int, b = 2, *r, **k) -> str:\n    log(a)\n    a\n",
-     "(fn_def m (dispatch (type A) (type B)) ((a (type int) ()) (b (type auto) (int 2)) "
-     "(* r (type auto)) (** k (type auto))) (type str) (do (apply log a) a))"),
+     "(fn_def m (dispatch (type A) (type B)) ((param a (type int) ()) (param b (type auto) (int 2)) "
+     "(spread_param r (type auto)) (spread_kw_param k (type auto))) (type str) "
+     "(do (apply log a) a))"),
     ("fn empty dispatch", "fn [] m(): 1\n", "(fn_def m (dispatch) () (type auto) (int 1))"),
     ("co", "co g(<- int, n) -> int: yield n\n",
-     "(co_def g () ((n (type auto) ())) (type int) (type int) (yield n))"),
+     "(co_def g () ((param n (type auto) ())) (type int) (type int) (yield n))"),
     ("class", "class A(B):\n    slot n: int = 0\n    fn [A] get(): this.n\n",
      "(class_def A B (do (slot_def n (type int) (int 0) ()) "
      "(fn_def get (dispatch (type A)) () (type auto) (attr this n))))"),

@@ -93,12 +93,12 @@ fn type_name(ty) -> TreeBase:
 # Reads the *types* in a signature. Types are carried by the tree and
 # enforced by nothing, which is exactly what makes them a decorator's to
 # read: this one answers the declared parameter type names as an array. A
-# parameter is (name type default).
+# parameter is (param name type default).
 fn [TreeBase] param_types():
     s := sexpr(this)
     out := []
     for param in nth(s, _FN_PARAMS):
-        name := type_name(nth(param, 1))
+        name := type_name(nth(param, 2))
         if name == 'auto:
             out ! append($['str, "?"])
         else:

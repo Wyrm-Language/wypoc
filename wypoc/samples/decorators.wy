@@ -101,7 +101,7 @@ println("fn: " + str(add(2, 3)))
 
 println("typed: " + str(measured(5)))
 
-# `*rest` is a marked entry of the parameter list, `(* others (type auto))`.
+# `*rest` is a headed entry of the parameter list, `(spread_param others (type auto))`.
 @__dump fn spread(a: int, *others) -> int:
     return a
 

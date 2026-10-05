@@ -391,11 +391,11 @@ def _encode_params(params) -> object:
     out = []
     for p in params:
         if isinstance(p, ast.VarPositional):
-            out.append(_pairs([Symbol("*"), Symbol(p.name), encode_type(None)]))
+            out.append(node("spread_param", Symbol(p.name), encode_type(None)))
         elif isinstance(p, ast.VarKeyword):
-            out.append(_pairs([Symbol("**"), Symbol(p.name), encode_type(None)]))
+            out.append(node("spread_kw_param", Symbol(p.name), encode_type(None)))
         else:
-            out.append(_pairs([Symbol(p.name), encode_type(p.type), encode(p.default)]))
+            out.append(node("param", Symbol(p.name), encode_type(p.type), encode(p.default)))
     return _pairs(out)
 
 
@@ -876,12 +876,16 @@ def _decode_params(sexpr) -> list:
     out = []
     for entry in _as_list(sexpr, "a parameter list"):
         items = _as_list(entry, "a parameter")
-        if items and items[0] in (Symbol("*"), Symbol("**")):
-            name, _type = _expect(items[1:], 2, items[0].name)
-            cls = ast.VarPositional if items[0] == Symbol("*") else ast.VarKeyword
+        head = items[0] if items else None
+        if head in (Symbol("spread_param"), Symbol("spread_kw_param")):
+            name, _type = _expect(items[1:], 2, head.name)
+            cls = ast.VarPositional if head == Symbol("spread_param") else ast.VarKeyword
             out.append(cls(_sym(name, "a parameter's name")))
             continue
-        name, type_sexpr, default = _expect(items, 3, "parameter")
+        if head != Symbol("param"):
+            raise SexprError("a parameter must be a (param ...), (spread_param ...) "
+                             "or (spread_kw_param ...) form")
+        name, type_sexpr, default = _expect(items[1:], 3, "param")
         out.append(ast.Param(_sym(name, "a parameter's name"), decode_type(type_sexpr),
                              _opt_expr(default)))
     return out
