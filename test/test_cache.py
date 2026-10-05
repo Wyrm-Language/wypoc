@@ -75,6 +75,20 @@ def test_a_stale_header_from_a_moved_script_is_a_miss(tmp_path):
     assert cache.load(other) is None
 
 
+def test_an_entry_from_another_front_end_is_a_miss(tmp_path, monkeypatch):
+    """A changed grammar or tokenizer with the same source mtime must not
+    serve the old tree (AST_FORMAT covers the whole front end)."""
+    script = write_script(tmp_path / "a.wy")
+    cache.save(script, make_tree(1))
+    monkeypatch.setattr(cache, "AST_FORMAT", "a-newer-parser")
+    assert cache.load(script) is None
+
+
+def test_the_format_digests_every_front_end_module():
+    for name in ("ast_nodes.py", "wyrm_tokenizer.py", "parser.py", "actions.py", "parse.py"):
+        assert name in cache._FRONT_END
+
+
 def test_an_unwritable_local_dir_just_leaves_the_run_uncached(tmp_path):
     script = write_script(tmp_path / "a.wy")
     blocker = tmp_path / cache.CACHE_DIR_NAME

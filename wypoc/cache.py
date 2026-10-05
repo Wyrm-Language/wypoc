@@ -30,9 +30,11 @@ just a miss, and `save` overwrites the stale entry, same as a first run.
 A cache directory holds one entry per script: the pickled tree above
 (`foo.wy_ast`, the tree walker's).
 
-An entry also records `AST_FORMAT`, a digest of `ast_nodes.py`: changing
-the node classes changes it, so an entry pickled against the old shapes is a
-miss rather than a tree the evaluator no longer understands.
+An entry also records `AST_FORMAT`, a digest of the modules that decide
+what tree a source parses to (`_FRONT_END`: the node classes, the tokenizer,
+the generated parser, its actions and the parse driver). Changing any of
+them changes it, so an entry pickled against old shapes, or parsed by an
+old grammar, is a miss rather than a stale tree.
 
 Proof-of-concept only: pickle, no security hardening, no cross-interpreter
 guarantees.
@@ -47,11 +49,18 @@ CACHE_DIR_NAME = "__wycache__"
 CACHE_EXT = ".wy_ast"
 
 
-def _ast_format() -> str:
-    from wypoc import ast_nodes
+# The front end: every module whose source can change the tree a script
+# parses to. Read as files beside this one, without importing them.
+_FRONT_END = ("ast_nodes.py", "wyrm_tokenizer.py", "parser.py", "actions.py", "parse.py")
 
-    with open(ast_nodes.__file__, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()[:16]
+
+def _ast_format() -> str:
+    digest = hashlib.sha256()
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    for name in _FRONT_END:
+        with open(os.path.join(package_dir, name), "rb") as f:
+            digest.update(name.encode("utf-8") + b"\0" + f.read())
+    return digest.hexdigest()[:16]
 
 
 AST_FORMAT = _ast_format()
