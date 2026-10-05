@@ -168,10 +168,26 @@ def _attach_doc_comments(src: str, program: "ast.Program") -> None:
         program.doc = lead_text
 
 
+class _SeparatorTokenizer(Tokenizer):
+    """pegen's Tokenizer without its merging of consecutive NEWLINE tokens.
+    wyrm_tokenizer emits a NEWLINE for a line break and for a `;`, and the
+    grammar must see each one: `;` then a line break may come before an
+    `else`, but two `;` may not (design syntax.md G10). Our tokenizer emits
+    no NL or COMMENT tokens, so nothing else is filtered."""
+
+    def peek(self):
+        while self._index == len(self._tokens):
+            tok = next(self._tokengen)
+            self._tokens.append(tok)
+            if not self._path and tok.start[0] not in self._lines:
+                self._lines[tok.start[0]] = tok.line
+        return self._tokens[self._index]
+
+
 def parse(src: str, verbose: bool = False, filename: str = "<string>"):
     def _do_parse():
         tokengen = generate_tokens(src)
-        tokenizer = Tokenizer(tokengen, verbose=verbose)
+        tokenizer = _SeparatorTokenizer(tokengen, verbose=verbose)
         parser = GeneratedParser(tokenizer, verbose=verbose)
         tree = parser.start()
         if tree is None:

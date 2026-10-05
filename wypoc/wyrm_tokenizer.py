@@ -181,12 +181,18 @@ class _Lexer:
         elif self.bracket_depth == 0 and self.brace_depth == 0:
             yield from self._emit_dedents_if_needed(self.col)
 
+        # Inside a brace block the layout pass (_handle_indentation) doesn't
+        # run, so a blank or comment-only line arrives here. It ends no
+        # statement and emits no NEWLINE, as outside braces: only one line
+        # break may stand before an `else` (design syntax.md G10).
+        line_has_tokens = False
         while True:
             c = self.peekc()
             if c == "" or c == "\n":
                 # end of physical line
                 if self.bracket_depth == 0:
-                    yield TokenInfo(token.NEWLINE, "\n", (self.lineno + 1, self.col), (self.lineno + 1, self.col + 1), self.line)
+                    if line_has_tokens or self.brace_depth == 0:
+                        yield TokenInfo(token.NEWLINE, "\n", (self.lineno + 1, self.col), (self.lineno + 1, self.col + 1), self.line)
                     self.at_line_start = True
                     self._advance_line()
                     return
@@ -205,6 +211,7 @@ class _Lexer:
                 # comment runs to end of physical line
                 self.col = len(self.line)
                 continue
+            line_has_tokens = True
             start = (self.lineno + 1, self.col)
             if c == '"':
                 yield self._scan_string(start)

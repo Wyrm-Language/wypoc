@@ -88,46 +88,72 @@ from wypoc.ast_nodes import (
 # instead. No other rule in this grammar is both nullable and positioned.
 start[object]: p=program ENDMARKER { with_pos(p, LOCATIONS) }
 
-program[object]: stmts=stmt_item* NEWLINE* { Program([s for group in stmts for s in group]) }
+program[object]: NEWLINE* stmts=stmt_item* { Program(stmts) }
 
 # ---------------------------------------------------------------------
-# Blocks and statements
+# Blocks and statements (design syntax.md G10)
 #
-# Mirrors CPython's own grammar idiom: a compound_stmt's block already ends
-# in its own DEDENT/"}"  with no trailing separator token to consume, while
-# one or more simple_stmts sharing a physical line are ";"-separated and the
-# line itself is terminated by a NEWLINE (which our tokenizer also uses for
-# a literal ";" acting as a bare separator, per doc/grammar.ebnf's stmt_sep).
+# Statements are separated, not terminated. A separator is a NEWLINE token,
+# which our tokenizer also emits for a literal ";" (its string tells the two
+# apart; see line_break). The tokenizer emits no STMT_END after a DEDENT: a
+# statement that ends in an indented block is ended by that block's DEDENT
+# (actions.at_statement_end). A block never owns the separator after it -
+# that includes the one-line block, which holds exactly one statement, so
+# `if a: x; y` is an `if` followed by `y`. Between two statements any run
+# of separators is allowed.
+#
+# The block rules answer a 1-tuple around the statement list: pegen's
+# generated code truthiness-checks a required sub-rule capture, so a bare
+# empty list (`{}`) would look like a failed match. `block` unwraps it, and
+# so keeps the old behaviour of failing on an empty body; class_block
+# passes the tuple on (an empty class body is fine).
 # ---------------------------------------------------------------------
 
 block[object]:
-    | ":" NEWLINE INDENT stmts=stmt_item* DEDENT { [s for group in stmts for s in group] }
-    | ":" stmts=simple_stmt_line { stmts }
-    | "{" NEWLINE* stmts=brace_stmt_item* "}" { [s for group in stmts for s in group] }
+    | b=indent_block { b[0] }
+    | b=line_block { b[0] }
+    | b=brace_block { b[0] }
 
+indent_block[object] (memo):
+    | ":" line_break INDENT NEWLINE* stmts=stmt_item* DEDENT { (stmts,) }
+
+# A statement ends at a separator or where its block ends, and an `else` or
+# `elif` doesn't end one: `if a: x else: y` is an error (G10).
+line_block[object] (memo):
+    | ":" s=simple_stmt { ([s],) if at_statement_end(self) else None }
+
+brace_block[object] (memo):
+    | "{" NEWLINE* stmts=stmt_item* "}" { (stmts,) }
+
+# One statement and the separators after it. A statement with no separator
+# after it must end where its block does (actions.at_statement_end); `f()
+# g()` is two juxtaposed statements and a syntax error (design syntax.md
+# G0). An action answering None fails its alternative, which is how that
+# check rejects one.
 stmt_item[object]:
-    | s=compound_stmt NEWLINE? { [s] }
-    | simple_stmt_line
+    | s=compound_stmt NEWLINE+ { s }
+    | s=compound_stmt { s if at_statement_end(self) else None }
+    | s=simple_stmt NEWLINE+ { s }
+    | s=simple_stmt { s if at_statement_end(self) else None }
 
-# Inside a brace-delimited block the layout rule is suppressed (see
-# wyrm_tokenizer's brace_depth handling), so real newlines and ";" both
-# surface as plain NEWLINE-type separators; tolerate runs of them between
-# members rather than requiring exactly one.
-brace_stmt_item[object]:
-    | s=compound_stmt NEWLINE* { [s] }
-    | first=simple_stmt NEWLINE+ { [first] }
-    | first=simple_stmt { [first] if at_statement_end(self) else None }
+# A line break, not a ";" (both arrive as NEWLINE tokens). A lookahead, not
+# an action answering None: a failed action leaves its tokens consumed, and
+# under `line_break?` nothing resets them.
+line_break[object]: !";" t=NEWLINE { t }
 
-# A statement ends at a separator (`;` or a newline) or where its block ends
-# (see actions.at_statement_end); `f() g()` is two juxtaposed statements and
-# a syntax error (design syntax.md G0). An action answering None fails its
-# alternative, which is how that last check rejects one.
-simple_stmt_line[object]:
-    | first=simple_stmt ";" rest=simple_stmt_line { [first] + rest }
-    | first=simple_stmt ";" NEWLINE { [first] }
-    | first=simple_stmt ";" { [first] }
-    | first=simple_stmt NEWLINE { [first] }
-    | first=simple_stmt { [first] if at_statement_end(self) else None }
+# The block before an `elif` or `else` carries its own separator (G10). A
+# one-line block must end its statement, with a ";" or a line break; a brace
+# or indented block may be followed by one line break (an indented block's
+# DEDENT already ended it). A ";" after a brace block, a line holding only
+# ";", or two ";" end the statement instead, and the clause is an error.
+clause_body[object]:
+    | b=line_block line_block_end { b }
+    | b=indent_block line_break? { b }
+    | b=brace_block line_break? { b }
+
+line_block_end[object]:
+    | ";" line_break? { True }
+    | line_break { True }
 
 # A decorator in front of a *simple* statement needs no rule of its own: a
 # simple statement that could carry one is an expression statement, and
@@ -215,15 +241,35 @@ emit_stmt[object]:
 
 # ---- if statement ------------------------------------------------------
 
+# After a clause_body an `elif` or `else` must follow; without one the
+# parser backtracks to a plain block, so `if a: x; y` is still an `if`
+# followed by `y` (design syntax.md G10).
 if_stmt[object]:
-    | 'if' cond=expression body=block elifs=elif_clause* orelse=else_clause? {
-          If(cond, body, elifs, orelse, LOCATIONS) }
+    | 'if' cond=expression body=clause_body tail=if_tail {
+          If(cond, body[0], tail[0], tail[1], LOCATIONS) }
+    | 'if' cond=expression body=block { If(cond, body, [], None, LOCATIONS) }
+
+# The clauses after a clause_body: (elifs, else body or None).
+if_tail[object]:
+    | e=elif_continued rest=if_tail { ([e] + rest[0], rest[1]) }
+    | e=elif_clause { ([e], None) }
+    | 'else' body=block { ([], body) }
 
 elif_clause[object]:
     | 'elif' cond=expression body=block { ElifClause(cond, body, LOCATIONS) }
 
-else_clause[object]:
-    | 'else' body=block { body }
+# An elif with another clause after it: clause_body's separator rules,
+# spelled out per block kind so the ElifClause's span ends at its block.
+elif_continued[object]:
+    | e=elif_line line_block_end { e }
+    | e=elif_long line_break? { e }
+
+elif_line[object]:
+    | 'elif' cond=expression body=line_block { ElifClause(cond, body[0], LOCATIONS) }
+
+elif_long[object]:
+    | 'elif' cond=expression body=indent_block { ElifClause(cond, body[0], LOCATIONS) }
+    | 'elif' cond=expression body=brace_block { ElifClause(cond, body[0], LOCATIONS) }
 
 # ---- while / for statements ---------------------------------------------
 # `for`'s `else` runs only if the loop completes without `break`, matching
@@ -233,7 +279,9 @@ while_stmt[object]:
     | 'while' cond=expression body=block { While(cond, body, LOCATIONS) }
 
 for_stmt[object]:
-    | 'for' n=NAME 'in' it=expression body=block orelse=else_clause? { For(n.string, it, body, orelse, var_pos=tok_pos(n), LOCATIONS) }
+    | 'for' n=NAME 'in' it=expression body=clause_body 'else' orelse=block {
+          For(n.string, it, body[0], orelse, var_pos=tok_pos(n), LOCATIONS) }
+    | 'for' n=NAME 'in' it=expression body=block { For(n.string, it, body, None, var_pos=tok_pos(n), LOCATIONS) }
 
 # ---- defer statement ------------------------------------------------------
 # `on` is a soft keyword (double-quoted below) rather than a reserved word,
@@ -470,9 +518,9 @@ class_base[object]:
     | b=assign_expr ","? { b }
 
 class_block[object]:
-    | ":" NEWLINE INDENT stmts=stmt_item* DEDENT { ([s for group in stmts for s in group],) }
-    | ":" stmts=simple_stmt_line { (stmts,) }
-    | "{" NEWLINE* stmts=brace_stmt_item* "}" { ([s for group in stmts for s in group],) }
+    | indent_block
+    | line_block
+    | brace_block
 
 # A virtual slot has a block defining `fn getter`/`fn setter` (design
 # syntax.md G3). A default and a block together parse; the evaluator
@@ -773,5 +821,6 @@ do_expr[object]:
 # as do_expr's Do case). Falling through with no matching branch and no
 # `else` yields None, same as an empty `do:`.
 if_expr[object]:
-    | 'if' cond=expression body=block elifs=elif_clause* orelse=else_clause? {
-          If(cond, body, elifs, orelse, LOCATIONS) }
+    | 'if' cond=expression body=clause_body tail=if_tail {
+          If(cond, body[0], tail[0], tail[1], LOCATIONS) }
+    | 'if' cond=expression body=block { If(cond, body, [], None, LOCATIONS) }

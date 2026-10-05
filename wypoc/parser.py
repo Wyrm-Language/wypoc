@@ -50,138 +50,175 @@ class GeneratedParser(Parser):
 
     @memoize
     def program(self) -> Optional[object]:
-        # program: stmt_item* NEWLINE*
+        # program: NEWLINE* stmt_item*
         # nullable=True
         mark = self._mark()
         if (
-            (stmts := self._loop0_1(),)
+            (self._loop0_1(),)
             and
-            (self._loop0_2(),)
+            (stmts := self._loop0_2(),)
         ):
-            return Program ( [s for group in stmts for s in group] );
+            return Program ( stmts );
         self._reset(mark)
         return None;
 
     @memoize
     def block(self) -> Optional[object]:
-        # block: ":" NEWLINE INDENT stmt_item* DEDENT | ":" simple_stmt_line | "{" NEWLINE* brace_stmt_item* "}"
+        # block: indent_block | line_block | brace_block
+        mark = self._mark()
+        if (
+            (b := self.indent_block())
+        ):
+            return b [0];
+        self._reset(mark)
+        if (
+            (b := self.line_block())
+        ):
+            return b [0];
+        self._reset(mark)
+        if (
+            (b := self.brace_block())
+        ):
+            return b [0];
+        self._reset(mark)
+        return None;
+
+    @memoize
+    def indent_block(self) -> Optional[object]:
+        # indent_block: ":" line_break INDENT NEWLINE* stmt_item* DEDENT
         mark = self._mark()
         if (
             (self.expect(":"))
             and
-            (self.expect('NEWLINE'))
+            (self.line_break())
             and
             (self.expect('INDENT'))
             and
-            (stmts := self._loop0_3(),)
+            (self._loop0_3(),)
+            and
+            (stmts := self._loop0_4(),)
             and
             (self.expect('DEDENT'))
         ):
-            return [s for group in stmts for s in group];
+            return ( stmts , );
         self._reset(mark)
+        return None;
+
+    @memoize
+    def line_block(self) -> Optional[object]:
+        # line_block: ":" simple_stmt
+        mark = self._mark()
         if (
             (self.expect(":"))
             and
-            (stmts := self.simple_stmt_line())
+            (s := self.simple_stmt())
         ):
-            return stmts;
+            return ( [s] , ) if at_statement_end ( self ) else None;
         self._reset(mark)
+        return None;
+
+    @memoize
+    def brace_block(self) -> Optional[object]:
+        # brace_block: "{" NEWLINE* stmt_item* "}"
+        mark = self._mark()
         if (
             (self.expect("{"))
             and
-            (self._loop0_4(),)
+            (self._loop0_5(),)
             and
-            (stmts := self._loop0_5(),)
+            (stmts := self._loop0_6(),)
             and
             (self.expect("}"))
         ):
-            return [s for group in stmts for s in group];
+            return ( stmts , );
         self._reset(mark)
         return None;
 
     @memoize
     def stmt_item(self) -> Optional[object]:
-        # stmt_item: compound_stmt NEWLINE? | simple_stmt_line
+        # stmt_item: compound_stmt NEWLINE+ | compound_stmt | simple_stmt NEWLINE+ | simple_stmt
         mark = self._mark()
         if (
             (s := self.compound_stmt())
-            and
-            (self.expect('NEWLINE'),)
-        ):
-            return [s];
-        self._reset(mark)
-        if (
-            (simple_stmt_line := self.simple_stmt_line())
-        ):
-            return simple_stmt_line;
-        self._reset(mark)
-        return None;
-
-    @memoize
-    def brace_stmt_item(self) -> Optional[object]:
-        # brace_stmt_item: compound_stmt NEWLINE* | simple_stmt NEWLINE+ | simple_stmt
-        mark = self._mark()
-        if (
-            (s := self.compound_stmt())
-            and
-            (self._loop0_6(),)
-        ):
-            return [s];
-        self._reset(mark)
-        if (
-            (first := self.simple_stmt())
             and
             (self._loop1_7())
         ):
-            return [first];
+            return s;
         self._reset(mark)
         if (
-            (first := self.simple_stmt())
+            (s := self.compound_stmt())
         ):
-            return [first] if at_statement_end ( self ) else None;
+            return s if at_statement_end ( self ) else None;
+        self._reset(mark)
+        if (
+            (s := self.simple_stmt())
+            and
+            (self._loop1_8())
+        ):
+            return s;
+        self._reset(mark)
+        if (
+            (s := self.simple_stmt())
+        ):
+            return s if at_statement_end ( self ) else None;
         self._reset(mark)
         return None;
 
     @memoize
-    def simple_stmt_line(self) -> Optional[object]:
-        # simple_stmt_line: simple_stmt ";" simple_stmt_line | simple_stmt ";" NEWLINE | simple_stmt ";" | simple_stmt NEWLINE | simple_stmt
+    def line_break(self) -> Optional[object]:
+        # line_break: !";" NEWLINE
         mark = self._mark()
         if (
-            (first := self.simple_stmt())
+            (self.negative_lookahead(self.expect, ";"))
             and
+            (t := self.expect('NEWLINE'))
+        ):
+            return t;
+        self._reset(mark)
+        return None;
+
+    @memoize
+    def clause_body(self) -> Optional[object]:
+        # clause_body: line_block line_block_end | indent_block line_break? | brace_block line_break?
+        mark = self._mark()
+        if (
+            (b := self.line_block())
+            and
+            (self.line_block_end())
+        ):
+            return b;
+        self._reset(mark)
+        if (
+            (b := self.indent_block())
+            and
+            (self.line_break(),)
+        ):
+            return b;
+        self._reset(mark)
+        if (
+            (b := self.brace_block())
+            and
+            (self.line_break(),)
+        ):
+            return b;
+        self._reset(mark)
+        return None;
+
+    @memoize
+    def line_block_end(self) -> Optional[object]:
+        # line_block_end: ";" line_break? | line_break
+        mark = self._mark()
+        if (
             (self.expect(";"))
             and
-            (rest := self.simple_stmt_line())
+            (self.line_break(),)
         ):
-            return [first] + rest;
+            return True;
         self._reset(mark)
         if (
-            (first := self.simple_stmt())
-            and
-            (self.expect(";"))
-            and
-            (self.expect('NEWLINE'))
+            (self.line_break())
         ):
-            return [first];
-        self._reset(mark)
-        if (
-            (first := self.simple_stmt())
-            and
-            (self.expect(";"))
-        ):
-            return [first];
-        self._reset(mark)
-        if (
-            (first := self.simple_stmt())
-            and
-            (self.expect('NEWLINE'))
-        ):
-            return [first];
-        self._reset(mark)
-        if (
-            (first := self.simple_stmt())
-        ):
-            return [first] if at_statement_end ( self ) else None;
+            return True;
         self._reset(mark)
         return None;
 
@@ -497,7 +534,7 @@ class GeneratedParser(Parser):
 
     @memoize
     def if_stmt(self) -> Optional[object]:
-        # if_stmt: 'if' expression block elif_clause* else_clause?
+        # if_stmt: 'if' expression clause_body if_tail | 'if' expression block
         mark = self._mark()
         tok = self._tokenizer.peek()
         start_lineno, start_col_offset = tok.start
@@ -506,15 +543,49 @@ class GeneratedParser(Parser):
             and
             (cond := self.expression())
             and
-            (body := self.block())
+            (body := self.clause_body())
             and
-            (elifs := self._loop0_8(),)
-            and
-            (orelse := self.else_clause(),)
+            (tail := self.if_tail())
         ):
             tok = self._tokenizer.get_last_non_whitespace_token()
             end_lineno, end_col_offset = tok.end
-            return If ( cond , body , elifs , orelse , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+            return If ( cond , body [0] , tail [0] , tail [1] , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+        self._reset(mark)
+        if (
+            (self.expect('if'))
+            and
+            (cond := self.expression())
+            and
+            (body := self.block())
+        ):
+            tok = self._tokenizer.get_last_non_whitespace_token()
+            end_lineno, end_col_offset = tok.end
+            return If ( cond , body , [] , None , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+        self._reset(mark)
+        return None;
+
+    @memoize
+    def if_tail(self) -> Optional[object]:
+        # if_tail: elif_continued if_tail | elif_clause | 'else' block
+        mark = self._mark()
+        if (
+            (e := self.elif_continued())
+            and
+            (rest := self.if_tail())
+        ):
+            return ( [e] + rest [0] , rest [1] );
+        self._reset(mark)
+        if (
+            (e := self.elif_clause())
+        ):
+            return ( [e] , None );
+        self._reset(mark)
+        if (
+            (self.expect('else'))
+            and
+            (body := self.block())
+        ):
+            return ( [] , body );
         self._reset(mark)
         return None;
 
@@ -538,15 +609,71 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def else_clause(self) -> Optional[object]:
-        # else_clause: 'else' block
+    def elif_continued(self) -> Optional[object]:
+        # elif_continued: elif_line line_block_end | elif_long line_break?
         mark = self._mark()
         if (
-            (self.expect('else'))
+            (e := self.elif_line())
             and
-            (body := self.block())
+            (self.line_block_end())
         ):
-            return body;
+            return e;
+        self._reset(mark)
+        if (
+            (e := self.elif_long())
+            and
+            (self.line_break(),)
+        ):
+            return e;
+        self._reset(mark)
+        return None;
+
+    @memoize
+    def elif_line(self) -> Optional[object]:
+        # elif_line: 'elif' expression line_block
+        mark = self._mark()
+        tok = self._tokenizer.peek()
+        start_lineno, start_col_offset = tok.start
+        if (
+            (self.expect('elif'))
+            and
+            (cond := self.expression())
+            and
+            (body := self.line_block())
+        ):
+            tok = self._tokenizer.get_last_non_whitespace_token()
+            end_lineno, end_col_offset = tok.end
+            return ElifClause ( cond , body [0] , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+        self._reset(mark)
+        return None;
+
+    @memoize
+    def elif_long(self) -> Optional[object]:
+        # elif_long: 'elif' expression indent_block | 'elif' expression brace_block
+        mark = self._mark()
+        tok = self._tokenizer.peek()
+        start_lineno, start_col_offset = tok.start
+        if (
+            (self.expect('elif'))
+            and
+            (cond := self.expression())
+            and
+            (body := self.indent_block())
+        ):
+            tok = self._tokenizer.get_last_non_whitespace_token()
+            end_lineno, end_col_offset = tok.end
+            return ElifClause ( cond , body [0] , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+        self._reset(mark)
+        if (
+            (self.expect('elif'))
+            and
+            (cond := self.expression())
+            and
+            (body := self.brace_block())
+        ):
+            tok = self._tokenizer.get_last_non_whitespace_token()
+            end_lineno, end_col_offset = tok.end
+            return ElifClause ( cond , body [0] , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
         self._reset(mark)
         return None;
 
@@ -571,7 +698,7 @@ class GeneratedParser(Parser):
 
     @memoize
     def for_stmt(self) -> Optional[object]:
-        # for_stmt: 'for' NAME 'in' expression block else_clause?
+        # for_stmt: 'for' NAME 'in' expression clause_body 'else' block | 'for' NAME 'in' expression block
         mark = self._mark()
         tok = self._tokenizer.peek()
         start_lineno, start_col_offset = tok.start
@@ -584,13 +711,30 @@ class GeneratedParser(Parser):
             and
             (it := self.expression())
             and
-            (body := self.block())
+            (body := self.clause_body())
             and
-            (orelse := self.else_clause(),)
+            (self.expect('else'))
+            and
+            (orelse := self.block())
         ):
             tok = self._tokenizer.get_last_non_whitespace_token()
             end_lineno, end_col_offset = tok.end
-            return For ( n . string , it , body , orelse , var_pos = tok_pos ( n ) , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+            return For ( n . string , it , body [0] , orelse , var_pos = tok_pos ( n ) , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+        self._reset(mark)
+        if (
+            (self.expect('for'))
+            and
+            (n := self.name())
+            and
+            (self.expect('in'))
+            and
+            (it := self.expression())
+            and
+            (body := self.block())
+        ):
+            tok = self._tokenizer.get_last_non_whitespace_token()
+            end_lineno, end_col_offset = tok.end
+            return For ( n . string , it , body , None , var_pos = tok_pos ( n ) , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
         self._reset(mark)
         return None;
 
@@ -1294,38 +1438,22 @@ class GeneratedParser(Parser):
 
     @memoize
     def class_block(self) -> Optional[object]:
-        # class_block: ":" NEWLINE INDENT stmt_item* DEDENT | ":" simple_stmt_line | "{" NEWLINE* brace_stmt_item* "}"
+        # class_block: indent_block | line_block | brace_block
         mark = self._mark()
         if (
-            (self.expect(":"))
-            and
-            (self.expect('NEWLINE'))
-            and
-            (self.expect('INDENT'))
-            and
-            (stmts := self._loop0_30(),)
-            and
-            (self.expect('DEDENT'))
+            (indent_block := self.indent_block())
         ):
-            return ( [s for group in stmts for s in group] , );
+            return indent_block;
         self._reset(mark)
         if (
-            (self.expect(":"))
-            and
-            (stmts := self.simple_stmt_line())
+            (line_block := self.line_block())
         ):
-            return ( stmts , );
+            return line_block;
         self._reset(mark)
         if (
-            (self.expect("{"))
-            and
-            (self._loop0_31(),)
-            and
-            (stmts := self._loop0_32(),)
-            and
-            (self.expect("}"))
+            (brace_block := self.brace_block())
         ):
-            return ( [s for group in stmts for s in group] , );
+            return brace_block;
         self._reset(mark)
         return None;
 
@@ -1340,9 +1468,9 @@ class GeneratedParser(Parser):
             and
             (n := self.name())
             and
-            (ty := self._tmp_33(),)
+            (ty := self._tmp_30(),)
             and
-            (dflt := self._tmp_34(),)
+            (dflt := self._tmp_31(),)
             and
             (body := self.block(),)
         ):
@@ -1397,7 +1525,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.assign_expr())
             and
-            (rest := self._loop0_35(),)
+            (rest := self._loop0_32(),)
         ):
             return [first] + tail ( rest );
         self._reset(mark)
@@ -1536,7 +1664,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.and_expr())
             and
-            (rest := self._loop0_36(),)
+            (rest := self._loop0_33(),)
         ):
             return fold_left ( first , [( 'or' , e ) for _ , e in rest] );
         self._reset(mark)
@@ -1549,7 +1677,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.not_expr())
             and
-            (rest := self._loop0_37(),)
+            (rest := self._loop0_34(),)
         ):
             return fold_left ( first , [( 'and' , e ) for _ , e in rest] );
         self._reset(mark)
@@ -1693,7 +1821,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.type_expr())
             and
-            (rest := self._loop0_38(),)
+            (rest := self._loop0_35(),)
         ):
             return [first] + tail ( rest );
         self._reset(mark)
@@ -1706,7 +1834,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.bitwise_xor_expr())
             and
-            (rest := self._loop0_39(),)
+            (rest := self._loop0_36(),)
         ):
             return fold_left ( first , [( '|' , e ) for _ , e in rest] );
         self._reset(mark)
@@ -1719,7 +1847,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.bitwise_and_expr())
             and
-            (rest := self._loop0_40(),)
+            (rest := self._loop0_37(),)
         ):
             return fold_left ( first , [( '^' , e ) for _ , e in rest] );
         self._reset(mark)
@@ -1732,7 +1860,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.shift_expr())
             and
-            (rest := self._loop0_41(),)
+            (rest := self._loop0_38(),)
         ):
             return fold_left ( first , [( '&' , e ) for _ , e in rest] );
         self._reset(mark)
@@ -1745,7 +1873,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.additive_expr())
             and
-            (rest := self._loop0_42(),)
+            (rest := self._loop0_39(),)
         ):
             return fold_left ( first , [( op . string , e ) for op , e in rest] );
         self._reset(mark)
@@ -1758,7 +1886,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.mult_expr())
             and
-            (rest := self._loop0_43(),)
+            (rest := self._loop0_40(),)
         ):
             return fold_left ( first , [( op . string , e ) for op , e in rest] );
         self._reset(mark)
@@ -1771,7 +1899,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.unary_expr())
             and
-            (rest := self._loop0_44(),)
+            (rest := self._loop0_41(),)
         ):
             return fold_left ( first , [( op . string , e ) for op , e in rest] );
         self._reset(mark)
@@ -1875,7 +2003,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.primary())
             and
-            (ops := self._loop0_45(),)
+            (ops := self._loop0_42(),)
         ):
             return fold_postfix ( first , ops );
         self._reset(mark)
@@ -2047,7 +2175,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.argument())
             and
-            (rest := self._loop0_46(),)
+            (rest := self._loop0_43(),)
             and
             (self.expect(","),)
         ):
@@ -2281,7 +2409,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.assign_expr())
             and
-            (rest := self._loop0_47(),)
+            (rest := self._loop0_44(),)
         ):
             return [first] + tail ( rest );
         self._reset(mark)
@@ -2320,7 +2448,7 @@ class GeneratedParser(Parser):
             and
             (first := self.assign_expr())
             and
-            (rest := self._loop1_48())
+            (rest := self._loop1_45())
             and
             (trailing := self.expect(","),)
             and
@@ -2367,7 +2495,7 @@ class GeneratedParser(Parser):
         if (
             (first := self.dict_pair())
             and
-            (rest := self._loop0_49(),)
+            (rest := self._loop0_46(),)
         ):
             return [first] + tail ( rest );
         self._reset(mark)
@@ -2451,7 +2579,7 @@ class GeneratedParser(Parser):
             and
             (self.expect(")"))
             and
-            (ret := self._tmp_50(),)
+            (ret := self._tmp_47(),)
             and
             (body := self.lambda_body())
         ):
@@ -2476,7 +2604,7 @@ class GeneratedParser(Parser):
             and
             (self.expect(")"))
             and
-            (ret := self._tmp_51(),)
+            (ret := self._tmp_48(),)
             and
             (body := self.lambda_body())
         ):
@@ -2495,7 +2623,7 @@ class GeneratedParser(Parser):
             and
             (e := self.assign_expr())
             and
-            (self.positive_lookahead(self._tmp_52, ))
+            (self.positive_lookahead(self._tmp_49, ))
         ):
             return [ExprStmt ( e , pos = e . pos )];
         self._reset(mark)
@@ -2557,7 +2685,7 @@ class GeneratedParser(Parser):
 
     @memoize
     def if_expr(self) -> Optional[object]:
-        # if_expr: 'if' expression block elif_clause* else_clause?
+        # if_expr: 'if' expression clause_body if_tail | 'if' expression block
         mark = self._mark()
         tok = self._tokenizer.peek()
         start_lineno, start_col_offset = tok.start
@@ -2566,47 +2694,43 @@ class GeneratedParser(Parser):
             and
             (cond := self.expression())
             and
-            (body := self.block())
+            (body := self.clause_body())
             and
-            (elifs := self._loop0_53(),)
-            and
-            (orelse := self.else_clause(),)
+            (tail := self.if_tail())
         ):
             tok = self._tokenizer.get_last_non_whitespace_token()
             end_lineno, end_col_offset = tok.end
-            return If ( cond , body , elifs , orelse , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+            return If ( cond , body [0] , tail [0] , tail [1] , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
+        self._reset(mark)
+        if (
+            (self.expect('if'))
+            and
+            (cond := self.expression())
+            and
+            (body := self.block())
+        ):
+            tok = self._tokenizer.get_last_non_whitespace_token()
+            end_lineno, end_col_offset = tok.end
+            return If ( cond , body , [] , None , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) );
         self._reset(mark)
         return None;
 
     @memoize
     def _loop0_1(self) -> Optional[Any]:
-        # _loop0_1: stmt_item
+        # _loop0_1: NEWLINE
         mark = self._mark()
         children = []
         while (
-            (stmt_item := self.stmt_item())
+            (_newline := self.expect('NEWLINE'))
         ):
-            children.append(stmt_item)
+            children.append(_newline)
             mark = self._mark()
         self._reset(mark)
         return children;
 
     @memoize
     def _loop0_2(self) -> Optional[Any]:
-        # _loop0_2: NEWLINE
-        mark = self._mark()
-        children = []
-        while (
-            (_newline := self.expect('NEWLINE'))
-        ):
-            children.append(_newline)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop0_3(self) -> Optional[Any]:
-        # _loop0_3: stmt_item
+        # _loop0_2: stmt_item
         mark = self._mark()
         children = []
         while (
@@ -2618,40 +2742,53 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
-    def _loop0_4(self) -> Optional[Any]:
-        # _loop0_4: NEWLINE
+    def _loop0_3(self) -> Optional[Any]:
+        # _loop0_3: NEWLINE
         mark = self._mark()
         children = []
         while (
             (_newline := self.expect('NEWLINE'))
         ):
             children.append(_newline)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
+    def _loop0_4(self) -> Optional[Any]:
+        # _loop0_4: stmt_item
+        mark = self._mark()
+        children = []
+        while (
+            (stmt_item := self.stmt_item())
+        ):
+            children.append(stmt_item)
             mark = self._mark()
         self._reset(mark)
         return children;
 
     @memoize
     def _loop0_5(self) -> Optional[Any]:
-        # _loop0_5: brace_stmt_item
-        mark = self._mark()
-        children = []
-        while (
-            (brace_stmt_item := self.brace_stmt_item())
-        ):
-            children.append(brace_stmt_item)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop0_6(self) -> Optional[Any]:
-        # _loop0_6: NEWLINE
+        # _loop0_5: NEWLINE
         mark = self._mark()
         children = []
         while (
             (_newline := self.expect('NEWLINE'))
         ):
             children.append(_newline)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
+    def _loop0_6(self) -> Optional[Any]:
+        # _loop0_6: stmt_item
+        mark = self._mark()
+        children = []
+        while (
+            (stmt_item := self.stmt_item())
+        ):
+            children.append(stmt_item)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2670,14 +2807,14 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
-    def _loop0_8(self) -> Optional[Any]:
-        # _loop0_8: elif_clause
+    def _loop1_8(self) -> Optional[Any]:
+        # _loop1_8: NEWLINE
         mark = self._mark()
         children = []
         while (
-            (elif_clause := self.elif_clause())
+            (_newline := self.expect('NEWLINE'))
         ):
-            children.append(elif_clause)
+            children.append(_newline)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2688,9 +2825,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_54 := self._tmp_54())
+            (_tmp_50 := self._tmp_50())
         ):
-            children.append(_tmp_54)
+            children.append(_tmp_50)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2727,9 +2864,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_55 := self._tmp_55())
+            (_tmp_51 := self._tmp_51())
         ):
-            children.append(_tmp_55)
+            children.append(_tmp_51)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2753,9 +2890,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_56 := self._tmp_56())
+            (_tmp_52 := self._tmp_52())
         ):
-            children.append(_tmp_56)
+            children.append(_tmp_52)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2792,9 +2929,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_57 := self._tmp_57())
+            (_tmp_53 := self._tmp_53())
         ):
-            children.append(_tmp_57)
+            children.append(_tmp_53)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2805,9 +2942,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_58 := self._tmp_58())
+            (_tmp_54 := self._tmp_54())
         ):
-            children.append(_tmp_58)
+            children.append(_tmp_54)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2818,9 +2955,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_59 := self._tmp_59())
+            (_tmp_55 := self._tmp_55())
         ):
-            children.append(_tmp_59)
+            children.append(_tmp_55)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2831,9 +2968,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_60 := self._tmp_60())
+            (_tmp_56 := self._tmp_56())
         ):
-            children.append(_tmp_60)
+            children.append(_tmp_56)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2844,9 +2981,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_61 := self._tmp_61())
+            (_tmp_57 := self._tmp_57())
         ):
-            children.append(_tmp_61)
+            children.append(_tmp_57)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2883,9 +3020,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_62 := self._tmp_62())
+            (_tmp_58 := self._tmp_58())
         ):
-            children.append(_tmp_62)
+            children.append(_tmp_58)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2896,9 +3033,9 @@ class GeneratedParser(Parser):
         mark = self._mark()
         children = []
         while (
-            (_tmp_63 := self._tmp_63())
+            (_tmp_59 := self._tmp_59())
         ):
-            children.append(_tmp_63)
+            children.append(_tmp_59)
             mark = self._mark()
         self._reset(mark)
         return children;
@@ -2956,47 +3093,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _loop0_30(self) -> Optional[Any]:
-        # _loop0_30: stmt_item
-        mark = self._mark()
-        children = []
-        while (
-            (stmt_item := self.stmt_item())
-        ):
-            children.append(stmt_item)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop0_31(self) -> Optional[Any]:
-        # _loop0_31: NEWLINE
-        mark = self._mark()
-        children = []
-        while (
-            (_newline := self.expect('NEWLINE'))
-        ):
-            children.append(_newline)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop0_32(self) -> Optional[Any]:
-        # _loop0_32: brace_stmt_item
-        mark = self._mark()
-        children = []
-        while (
-            (brace_stmt_item := self.brace_stmt_item())
-        ):
-            children.append(brace_stmt_item)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _tmp_33(self) -> Optional[Any]:
-        # _tmp_33: ":" ann_type
+    def _tmp_30(self) -> Optional[Any]:
+        # _tmp_30: ":" ann_type
         mark = self._mark()
         if (
             (literal := self.expect(":"))
@@ -3008,8 +3106,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_34(self) -> Optional[Any]:
-        # _tmp_34: "=" assign_expr
+    def _tmp_31(self) -> Optional[Any]:
+        # _tmp_31: "=" assign_expr
         mark = self._mark()
         if (
             (literal := self.expect("="))
@@ -3021,8 +3119,60 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
+    def _loop0_32(self) -> Optional[Any]:
+        # _loop0_32: ("," assign_expr)
+        mark = self._mark()
+        children = []
+        while (
+            (_tmp_60 := self._tmp_60())
+        ):
+            children.append(_tmp_60)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
+    def _loop0_33(self) -> Optional[Any]:
+        # _loop0_33: ('or' and_expr)
+        mark = self._mark()
+        children = []
+        while (
+            (_tmp_61 := self._tmp_61())
+        ):
+            children.append(_tmp_61)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
+    def _loop0_34(self) -> Optional[Any]:
+        # _loop0_34: ('and' not_expr)
+        mark = self._mark()
+        children = []
+        while (
+            (_tmp_62 := self._tmp_62())
+        ):
+            children.append(_tmp_62)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
     def _loop0_35(self) -> Optional[Any]:
-        # _loop0_35: ("," assign_expr)
+        # _loop0_35: ("|" type_expr)
+        mark = self._mark()
+        children = []
+        while (
+            (_tmp_63 := self._tmp_63())
+        ):
+            children.append(_tmp_63)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
+    def _loop0_36(self) -> Optional[Any]:
+        # _loop0_36: ("|" bitwise_xor_expr)
         mark = self._mark()
         children = []
         while (
@@ -3034,8 +3184,8 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
-    def _loop0_36(self) -> Optional[Any]:
-        # _loop0_36: ('or' and_expr)
+    def _loop0_37(self) -> Optional[Any]:
+        # _loop0_37: ("^" bitwise_and_expr)
         mark = self._mark()
         children = []
         while (
@@ -3047,8 +3197,8 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
-    def _loop0_37(self) -> Optional[Any]:
-        # _loop0_37: ('and' not_expr)
+    def _loop0_38(self) -> Optional[Any]:
+        # _loop0_38: ("&" shift_expr)
         mark = self._mark()
         children = []
         while (
@@ -3060,8 +3210,8 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
-    def _loop0_38(self) -> Optional[Any]:
-        # _loop0_38: ("|" type_expr)
+    def _loop0_39(self) -> Optional[Any]:
+        # _loop0_39: (("<<" | ">>") additive_expr)
         mark = self._mark()
         children = []
         while (
@@ -3073,8 +3223,8 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
-    def _loop0_39(self) -> Optional[Any]:
-        # _loop0_39: ("|" bitwise_xor_expr)
+    def _loop0_40(self) -> Optional[Any]:
+        # _loop0_40: (("+" | "-") mult_expr)
         mark = self._mark()
         children = []
         while (
@@ -3086,8 +3236,8 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
-    def _loop0_40(self) -> Optional[Any]:
-        # _loop0_40: ("^" bitwise_and_expr)
+    def _loop0_41(self) -> Optional[Any]:
+        # _loop0_41: (("*" | "/" | "%") unary_expr)
         mark = self._mark()
         children = []
         while (
@@ -3099,60 +3249,8 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
-    def _loop0_41(self) -> Optional[Any]:
-        # _loop0_41: ("&" shift_expr)
-        mark = self._mark()
-        children = []
-        while (
-            (_tmp_70 := self._tmp_70())
-        ):
-            children.append(_tmp_70)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
     def _loop0_42(self) -> Optional[Any]:
-        # _loop0_42: (("<<" | ">>") additive_expr)
-        mark = self._mark()
-        children = []
-        while (
-            (_tmp_71 := self._tmp_71())
-        ):
-            children.append(_tmp_71)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop0_43(self) -> Optional[Any]:
-        # _loop0_43: (("+" | "-") mult_expr)
-        mark = self._mark()
-        children = []
-        while (
-            (_tmp_72 := self._tmp_72())
-        ):
-            children.append(_tmp_72)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop0_44(self) -> Optional[Any]:
-        # _loop0_44: (("*" | "/" | "%") unary_expr)
-        mark = self._mark()
-        children = []
-        while (
-            (_tmp_73 := self._tmp_73())
-        ):
-            children.append(_tmp_73)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop0_45(self) -> Optional[Any]:
-        # _loop0_45: postfix_op
+        # _loop0_42: postfix_op
         mark = self._mark()
         children = []
         while (
@@ -3164,60 +3262,60 @@ class GeneratedParser(Parser):
         return children;
 
     @memoize
+    def _loop0_43(self) -> Optional[Any]:
+        # _loop0_43: ("," argument)
+        mark = self._mark()
+        children = []
+        while (
+            (_tmp_70 := self._tmp_70())
+        ):
+            children.append(_tmp_70)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
+    def _loop0_44(self) -> Optional[Any]:
+        # _loop0_44: ("," assign_expr)
+        mark = self._mark()
+        children = []
+        while (
+            (_tmp_71 := self._tmp_71())
+        ):
+            children.append(_tmp_71)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
+    def _loop1_45(self) -> Optional[Any]:
+        # _loop1_45: ("," assign_expr)
+        mark = self._mark()
+        children = []
+        while (
+            (_tmp_72 := self._tmp_72())
+        ):
+            children.append(_tmp_72)
+            mark = self._mark()
+        self._reset(mark)
+        return children;
+
+    @memoize
     def _loop0_46(self) -> Optional[Any]:
-        # _loop0_46: ("," argument)
+        # _loop0_46: ("," dict_pair)
         mark = self._mark()
         children = []
         while (
-            (_tmp_74 := self._tmp_74())
+            (_tmp_73 := self._tmp_73())
         ):
-            children.append(_tmp_74)
+            children.append(_tmp_73)
             mark = self._mark()
         self._reset(mark)
         return children;
 
     @memoize
-    def _loop0_47(self) -> Optional[Any]:
-        # _loop0_47: ("," assign_expr)
-        mark = self._mark()
-        children = []
-        while (
-            (_tmp_75 := self._tmp_75())
-        ):
-            children.append(_tmp_75)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop1_48(self) -> Optional[Any]:
-        # _loop1_48: ("," assign_expr)
-        mark = self._mark()
-        children = []
-        while (
-            (_tmp_76 := self._tmp_76())
-        ):
-            children.append(_tmp_76)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _loop0_49(self) -> Optional[Any]:
-        # _loop0_49: ("," dict_pair)
-        mark = self._mark()
-        children = []
-        while (
-            (_tmp_77 := self._tmp_77())
-        ):
-            children.append(_tmp_77)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _tmp_50(self) -> Optional[Any]:
-        # _tmp_50: "->" ann_type
+    def _tmp_47(self) -> Optional[Any]:
+        # _tmp_47: "->" ann_type
         mark = self._mark()
         if (
             (literal := self.expect("->"))
@@ -3229,8 +3327,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_51(self) -> Optional[Any]:
-        # _tmp_51: "->" ann_type
+    def _tmp_48(self) -> Optional[Any]:
+        # _tmp_48: "->" ann_type
         mark = self._mark()
         if (
             (literal := self.expect("->"))
@@ -3242,8 +3340,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_52(self) -> Optional[Any]:
-        # _tmp_52: "," | ")" | "]" | "}"
+    def _tmp_49(self) -> Optional[Any]:
+        # _tmp_49: "," | ")" | "]" | "}"
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3268,21 +3366,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _loop0_53(self) -> Optional[Any]:
-        # _loop0_53: elif_clause
-        mark = self._mark()
-        children = []
-        while (
-            (elif_clause := self.elif_clause())
-        ):
-            children.append(elif_clause)
-            mark = self._mark()
-        self._reset(mark)
-        return children;
-
-    @memoize
-    def _tmp_54(self) -> Optional[Any]:
-        # _tmp_54: "," var_target
+    def _tmp_50(self) -> Optional[Any]:
+        # _tmp_50: "," var_target
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3294,8 +3379,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_55(self) -> Optional[Any]:
-        # _tmp_55: "," target
+    def _tmp_51(self) -> Optional[Any]:
+        # _tmp_51: "," target
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3307,8 +3392,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_56(self) -> Optional[Any]:
-        # _tmp_56: "." NAME
+    def _tmp_52(self) -> Optional[Any]:
+        # _tmp_52: "." NAME
         mark = self._mark()
         if (
             (literal := self.expect("."))
@@ -3320,8 +3405,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_57(self) -> Optional[Any]:
-        # _tmp_57: "::" NAME
+    def _tmp_53(self) -> Optional[Any]:
+        # _tmp_53: "::" NAME
         mark = self._mark()
         if (
             (literal := self.expect("::"))
@@ -3333,8 +3418,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_58(self) -> Optional[Any]:
-        # _tmp_58: "|" type_expr
+    def _tmp_54(self) -> Optional[Any]:
+        # _tmp_54: "|" type_expr
         mark = self._mark()
         if (
             (literal := self.expect("|"))
@@ -3346,8 +3431,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_59(self) -> Optional[Any]:
-        # _tmp_59: "::" NAME
+    def _tmp_55(self) -> Optional[Any]:
+        # _tmp_55: "::" NAME
         mark = self._mark()
         if (
             (literal := self.expect("::"))
@@ -3359,8 +3444,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_60(self) -> Optional[Any]:
-        # _tmp_60: "," import_item
+    def _tmp_56(self) -> Optional[Any]:
+        # _tmp_56: "," import_item
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3372,8 +3457,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_61(self) -> Optional[Any]:
-        # _tmp_61: "," NAME
+    def _tmp_57(self) -> Optional[Any]:
+        # _tmp_57: "," NAME
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3385,8 +3470,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_62(self) -> Optional[Any]:
-        # _tmp_62: "," NAME
+    def _tmp_58(self) -> Optional[Any]:
+        # _tmp_58: "," NAME
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3398,8 +3483,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_63(self) -> Optional[Any]:
-        # _tmp_63: "," param
+    def _tmp_59(self) -> Optional[Any]:
+        # _tmp_59: "," param
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3411,8 +3496,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_64(self) -> Optional[Any]:
-        # _tmp_64: "," assign_expr
+    def _tmp_60(self) -> Optional[Any]:
+        # _tmp_60: "," assign_expr
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3424,8 +3509,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_65(self) -> Optional[Any]:
-        # _tmp_65: 'or' and_expr
+    def _tmp_61(self) -> Optional[Any]:
+        # _tmp_61: 'or' and_expr
         mark = self._mark()
         if (
             (literal := self.expect('or'))
@@ -3437,8 +3522,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_66(self) -> Optional[Any]:
-        # _tmp_66: 'and' not_expr
+    def _tmp_62(self) -> Optional[Any]:
+        # _tmp_62: 'and' not_expr
         mark = self._mark()
         if (
             (literal := self.expect('and'))
@@ -3450,8 +3535,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_67(self) -> Optional[Any]:
-        # _tmp_67: "|" type_expr
+    def _tmp_63(self) -> Optional[Any]:
+        # _tmp_63: "|" type_expr
         mark = self._mark()
         if (
             (literal := self.expect("|"))
@@ -3463,8 +3548,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_68(self) -> Optional[Any]:
-        # _tmp_68: "|" bitwise_xor_expr
+    def _tmp_64(self) -> Optional[Any]:
+        # _tmp_64: "|" bitwise_xor_expr
         mark = self._mark()
         if (
             (literal := self.expect("|"))
@@ -3476,8 +3561,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_69(self) -> Optional[Any]:
-        # _tmp_69: "^" bitwise_and_expr
+    def _tmp_65(self) -> Optional[Any]:
+        # _tmp_65: "^" bitwise_and_expr
         mark = self._mark()
         if (
             (literal := self.expect("^"))
@@ -3489,8 +3574,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_70(self) -> Optional[Any]:
-        # _tmp_70: "&" shift_expr
+    def _tmp_66(self) -> Optional[Any]:
+        # _tmp_66: "&" shift_expr
         mark = self._mark()
         if (
             (literal := self.expect("&"))
@@ -3502,47 +3587,47 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_71(self) -> Optional[Any]:
-        # _tmp_71: ("<<" | ">>") additive_expr
+    def _tmp_67(self) -> Optional[Any]:
+        # _tmp_67: ("<<" | ">>") additive_expr
         mark = self._mark()
         if (
-            (_tmp_78 := self._tmp_78())
+            (_tmp_74 := self._tmp_74())
             and
             (additive_expr := self.additive_expr())
         ):
-            return [_tmp_78, additive_expr];
+            return [_tmp_74, additive_expr];
         self._reset(mark)
         return None;
 
     @memoize
-    def _tmp_72(self) -> Optional[Any]:
-        # _tmp_72: ("+" | "-") mult_expr
+    def _tmp_68(self) -> Optional[Any]:
+        # _tmp_68: ("+" | "-") mult_expr
         mark = self._mark()
         if (
-            (_tmp_79 := self._tmp_79())
+            (_tmp_75 := self._tmp_75())
             and
             (mult_expr := self.mult_expr())
         ):
-            return [_tmp_79, mult_expr];
+            return [_tmp_75, mult_expr];
         self._reset(mark)
         return None;
 
     @memoize
-    def _tmp_73(self) -> Optional[Any]:
-        # _tmp_73: ("*" | "/" | "%") unary_expr
+    def _tmp_69(self) -> Optional[Any]:
+        # _tmp_69: ("*" | "/" | "%") unary_expr
         mark = self._mark()
         if (
-            (_tmp_80 := self._tmp_80())
+            (_tmp_76 := self._tmp_76())
             and
             (unary_expr := self.unary_expr())
         ):
-            return [_tmp_80, unary_expr];
+            return [_tmp_76, unary_expr];
         self._reset(mark)
         return None;
 
     @memoize
-    def _tmp_74(self) -> Optional[Any]:
-        # _tmp_74: "," argument
+    def _tmp_70(self) -> Optional[Any]:
+        # _tmp_70: "," argument
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3554,8 +3639,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_75(self) -> Optional[Any]:
-        # _tmp_75: "," assign_expr
+    def _tmp_71(self) -> Optional[Any]:
+        # _tmp_71: "," assign_expr
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3567,8 +3652,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_76(self) -> Optional[Any]:
-        # _tmp_76: "," assign_expr
+    def _tmp_72(self) -> Optional[Any]:
+        # _tmp_72: "," assign_expr
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3580,8 +3665,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_77(self) -> Optional[Any]:
-        # _tmp_77: "," dict_pair
+    def _tmp_73(self) -> Optional[Any]:
+        # _tmp_73: "," dict_pair
         mark = self._mark()
         if (
             (literal := self.expect(","))
@@ -3593,8 +3678,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_78(self) -> Optional[Any]:
-        # _tmp_78: "<<" | ">>"
+    def _tmp_74(self) -> Optional[Any]:
+        # _tmp_74: "<<" | ">>"
         mark = self._mark()
         if (
             (literal := self.expect("<<"))
@@ -3609,8 +3694,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_79(self) -> Optional[Any]:
-        # _tmp_79: "+" | "-"
+    def _tmp_75(self) -> Optional[Any]:
+        # _tmp_75: "+" | "-"
         mark = self._mark()
         if (
             (literal := self.expect("+"))
@@ -3625,8 +3710,8 @@ class GeneratedParser(Parser):
         return None;
 
     @memoize
-    def _tmp_80(self) -> Optional[Any]:
-        # _tmp_80: "*" | "/" | "%"
+    def _tmp_76(self) -> Optional[Any]:
+        # _tmp_76: "*" | "/" | "%"
         mark = self._mark()
         if (
             (literal := self.expect("*"))

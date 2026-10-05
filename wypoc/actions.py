@@ -139,21 +139,22 @@ def fold_index_target(base, indices):
     return node
 
 
-_ENDS_AN_INLINE_BLOCK = frozenset({"}", ")", "]", ",", "else", "elif"})
+_ENDS_AN_INLINE_BLOCK = frozenset({"}", ")", "]", ","})
 
 
 def at_statement_end(parser) -> bool:
-    """Whether a statement with no `;` or newline after it still ended:
-    the next token closes its block (`}`, a dedent, the end of input) or
-    the expression an inline block sits in (`)`, `]`, `,`, an `else` or
-    `elif` - none of which can start a statement), or the statement itself
-    ended in an indented block - `f := fn():` and its body, whose dedent is
-    the separator. Anything else is a juxtaposed statement (design
-    syntax.md G0)."""
+    """Whether a statement ended at this point: a separator (`;` or a
+    newline, both NEWLINE tokens) follows, the next token closes its block
+    (`}`, a dedent, the end of input) or the expression an inline block
+    sits in (`)`, `]`, `,`), or the statement itself ended in an indented
+    block - `f := fn():` and its body, whose dedent is the separator.
+    Anything else is a juxtaposed statement (design syntax.md G0). An
+    `else` or `elif` doesn't end a statement: before one, a one-line block
+    needs its `;` or line break (G10)."""
     tokens = parser._tokenizer._tokens
     index = parser._mark()
     following = parser._tokenizer.peek()
-    if following.type in (token.DEDENT, token.ENDMARKER):
+    if following.type in (token.NEWLINE, token.DEDENT, token.ENDMARKER):
         return True
     if following.string in _ENDS_AN_INLINE_BLOCK:
         return True

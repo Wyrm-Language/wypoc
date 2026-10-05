@@ -99,12 +99,26 @@ top_level_stmt  ::= import_stmt
    2. Blocks and statements
    --------------------------------------------------------------------- *)
 
-block           ::= ":" , NEWLINE , INDENT , stmt_list , DEDENT
-                   | ":" , stmt_line                          (* one-liner *)
-                   | "{" , stmt_list , "}" ;
+(* Statements are separated, not terminated (design syntax.md G10). A block
+   doesn't own the separator after it; a one-line block holds exactly one
+   statement, so in `if a: x; y` the `y` follows the `if`. Between two
+   statements any run of separators is allowed. NEWLINE is a line break;
+   STMT_END is what the layout pass emits after each DEDENT (wypoc's
+   tokenizer emits none: there the DEDENT itself ends the statement). *)
+block           ::= indent_block | line_block | brace_block ;
+indent_block    ::= ":" , NEWLINE , INDENT , stmt_list , DEDENT ;
+line_block      ::= ":" , stmt_line ;
+brace_block     ::= "{" , stmt_list , "}" ;
 
-stmt_list       ::= stmt_line , { stmt_sep , stmt_line } , [ stmt_sep ] ;
-stmt_sep        ::= NEWLINE | ";" ;
+stmt_list       ::= stmt_line , { stmt_sep , { stmt_sep } , stmt_line } , { stmt_sep } ;
+stmt_sep        ::= NEWLINE | ";" | STMT_END ;
+
+(* The block before an `elif` or `else` carries its own separator: a
+   one-line block ends its statement with `;` or a line break, and a brace
+   or indented block may be followed by one line break. `if a: x else: y`
+   and `if a { x }; else { y }` are errors (G10). *)
+clause_body     ::= line_block , ( ";" , [ NEWLINE ] | NEWLINE )
+                   | ( indent_block | brace_block ) , [ NEWLINE | STMT_END ] ;
 
 (* Everything is an expression - see doc/grammar-notes.md. *)
 (* A decorator in front of an expression statement is part of the
@@ -141,14 +155,14 @@ expr_stmt       ::= expression ;
 
 defer_stmt      ::= "defer" , [ "on" , type_constraint ] , block ;
 
-if_stmt         ::= "if" , expression , block ,
-                     { "elif" , expression , block } ,
-                     [ "else" , block ] ;
+if_stmt         ::= "if" , expression ,
+                     { clause_body , "elif" , expression } ,
+                     [ clause_body , "else" ] , block ;
 
 while_stmt      ::= "while" , expression , block ;
 
-for_stmt        ::= "for" , identifier , "in" , expression , block ,
-                     [ "else" , block ] ;
+for_stmt        ::= "for" , identifier , "in" , expression ,
+                     [ clause_body , "else" ] , block ;
 
 var_stmt        ::= "var" , var_target , { "," , var_target } , [ "=" , expr_list ] ;
 var_target      ::= identifier , [ ":" , type_constraint ] ;
