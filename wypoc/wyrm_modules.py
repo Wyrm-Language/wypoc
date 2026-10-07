@@ -4,10 +4,12 @@ Mirrors Python's own import machinery closely enough to be familiar:
   - WYRM_PATH (colon-separated, like PYTHONPATH) lists directories to search,
     checked in order, with wypoc's own corelib/ directory (installed as
     package data) as a final fallback.
-  - `import std::io` looks for <root>/std/io.wy under each search root.
+  - `import std::io` looks for io.wy (or io/__init__.wy) in the directory
+    `std` resolved to, the way Python searches a package's `__path__`.
   - `import std` (a directory) looks for <root>/std/__init__.wy, matching
-    Python's package convention (a bare directory with no __init__.wy isn't
-    an importable package here - no namespace-package support).
+    Python's package convention. A bare directory with no __init__.wy is a
+    namespace package (PEP 420): it holds modules but runs no code, and may
+    be spread over several roots. See resolve_module for the full order.
 
 No parsing/evaluation lives here - just figuring out which file (if any) a
 `mod::sub::leaf`-style path resolves to under the configured search paths.
@@ -96,21 +98,79 @@ def prelude_path() -> str:
     return os.path.join(DEFAULT_COREPATH, "prelude.wy")
 
 
-def resolve_module_file(path_segments, roots=None):
-    """Find the .wy file for a `mod::sub::leaf` path (path_segments a list
-    of names, e.g. ["std", "io"]). Returns (file_path, is_package), or None
-    if no root has it. A plain file `<root>/mod/sub/leaf.wy` is preferred
-    over a package directory `<root>/mod/sub/leaf/__init__.wy` when a root
-    happens to have both, mirroring Python's own module-over-package
-    preference within a single search root."""
-    if roots is None:
-        roots = search_paths()
-    for root in roots:
-        candidate = os.path.join(root, *path_segments)
-        file_candidate = candidate + ".wy"
-        if os.path.isfile(file_candidate):
-            return file_candidate, False
+class Resolved:
+    """Where a `mod::sub::leaf` path lives (project design/modules.md M1).
+
+    `kind` is "package" (a directory with `__init__.wy`), "module" (a `.wy`
+    file) or "namespace" (directories with no `__init__.wy`, which hold
+    modules but have no code). `file` is the `.wy` file to run, None for a
+    namespace package. `dirs` is where the path's children are looked up:
+    the package's own directory, every directory a namespace package spans,
+    and nothing for a module, which can't have children."""
+
+    __slots__ = ("kind", "file", "dirs")
+
+    def __init__(self, kind: str, file: "str | None", dirs: list):
+        self.kind = kind
+        self.file = file
+        self.dirs = dirs
+
+    @property
+    def is_package(self) -> bool:
+        return self.kind != "module"
+
+    def __repr__(self):
+        return f"Resolved({self.kind!r}, {self.file!r}, {self.dirs!r})"
+
+
+def _resolve_in(dirs, name: str) -> "Resolved | None":
+    """One segment, looked up in `dirs` in order, as Python's FileFinder
+    does: within a directory a package (`name/__init__.wy`) beats a module
+    (`name.wy`), which beats a bare directory. The first directory with a
+    package or a module wins outright; bare directories are only a
+    namespace package if no directory has either, and then every one of
+    them is a portion of it (PEP 420)."""
+    portions = []
+    for directory in dirs:
+        candidate = os.path.join(directory, name)
         init_candidate = os.path.join(candidate, "__init__.wy")
         if os.path.isfile(init_candidate):
-            return init_candidate, True
+            return Resolved("package", init_candidate, [candidate])
+        file_candidate = candidate + ".wy"
+        if os.path.isfile(file_candidate):
+            return Resolved("module", file_candidate, [])
+        if os.path.isdir(candidate):
+            portions.append(candidate)
+    if portions:
+        return Resolved("namespace", None, portions)
     return None
+
+
+def resolve_module(path_segments, roots=None) -> "Resolved | None":
+    """Resolve a `mod::sub::leaf` path (path_segments a list of names, e.g.
+    ["std", "io"]), or None if it names nothing.
+
+    The first segment is looked up in the search roots; each later one only
+    in the directories its parent resolved to, so a regular package's
+    children come from that package's own directory, a namespace package's
+    from every root it spans, and a module has none."""
+    if roots is None:
+        roots = search_paths()
+    dirs = list(roots)
+    resolved = None
+    for name in path_segments:
+        resolved = _resolve_in(dirs, name)
+        if resolved is None:
+            return None
+        dirs = resolved.dirs
+    return resolved
+
+
+def resolve_module_file(path_segments, roots=None):
+    """The .wy file for a `mod::sub::leaf` path, as (file_path, is_package),
+    or None if the path names nothing or names a namespace package (which
+    has no file). See resolve_module for the rules."""
+    resolved = resolve_module(path_segments, roots)
+    if resolved is None or resolved.file is None:
+        return None
+    return resolved.file, resolved.is_package

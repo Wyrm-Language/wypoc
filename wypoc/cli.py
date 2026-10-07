@@ -198,36 +198,63 @@ def check_imports(filename: str, tree, roots: "list | None",
     here as it is there, by trying the whole path first and falling back to
     path[:-1]. `from`-imports and `thread`-spawns have no such ambiguity
     (see ast_nodes.ThreadSpawn) - its whole path always names a
-    module."""
+    module.
+
+    The packages along a path are walked too, before the module itself,
+    since running the import runs their __init__.wy first. A package that
+    is already on the stack is passed through rather than reported: a
+    package importing its own children isn't a cycle (project
+    design/modules.md M1)."""
     if stack is None:
         stack = [(filename, _module_spelling(filename))]
     for node in tree.walk():
         if isinstance(node, ast.Import):
             path_segments = list(node.path)
-            resolved = wyrm_modules.resolve_module_file(path_segments, roots)
+            resolved = wyrm_modules.resolve_module(path_segments, roots)
             if resolved is None and len(path_segments) > 1:
-                resolved = wyrm_modules.resolve_module_file(path_segments[:-1], roots)
+                parent = wyrm_modules.resolve_module(path_segments[:-1], roots)
+                if parent is not None and parent.file is not None:
+                    resolved = parent
+                    path_segments = path_segments[:-1]
         elif isinstance(node, ast.ThreadSpawn):
             path_segments = list(node.path)
-            resolved = wyrm_modules.resolve_module_file(path_segments, roots)
+            resolved = wyrm_modules.resolve_module(path_segments, roots)
         else:
             continue
         if resolved is None:
             errors.append(f"{filename}: no module named "
                           f"{'::'.join(path_segments)!r}")
             continue
-        file_path, _is_package = resolved
+        # The packages along the path run first (design/modules.md M1).
+        # One still on the stack is passed through, not a cycle; only the
+        # whole path can close one.
+        for depth in range(1, len(path_segments)):
+            prefix = wyrm_modules.resolve_module(path_segments[:depth], roots)
+            if prefix is None or prefix.file is None:
+                continue
+            if _stack_index(stack, prefix.file) is not None:
+                continue
+            _walk_import(prefix.file, "::".join(path_segments[:depth]),
+                         roots, visited_files, errors, stack)
+        if resolved.file is None:
+            continue  # a namespace package: no code of its own
         spelling = "::".join(path_segments)
-        depth = _stack_index(stack, file_path)
+        depth = _stack_index(stack, resolved.file)
         if depth is not None:
             errors.append(_cycle_message(stack, depth, spelling))
             continue
-        if file_path in visited_files:
-            continue
-        visited_files.add(file_path)
-        stack.append((file_path, spelling))
-        _check_file(file_path, roots, visited_files, errors, stack)
-        stack.pop()
+        _walk_import(resolved.file, spelling, roots, visited_files, errors, stack)
+
+
+def _walk_import(file_path: str, spelling: str, roots: "list | None",
+                 visited_files: set, errors: list, stack: list) -> None:
+    """Walk one imported file, once per run, with it on the stack."""
+    if file_path in visited_files:
+        return
+    visited_files.add(file_path)
+    stack.append((file_path, spelling))
+    _check_file(file_path, roots, visited_files, errors, stack)
+    stack.pop()
 
 
 def _module_spelling(file_path: str) -> str:

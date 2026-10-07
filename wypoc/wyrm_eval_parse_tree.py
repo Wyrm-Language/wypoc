@@ -933,6 +933,10 @@ def import_stack() -> list:
     return _import_stack
 
 
+class ImportCycleError(ImportError):
+    """An import that closed a cycle (doc/addendum.md)."""
+
+
 def check_import_cycle(key: str) -> None:
     """Raise if importing `key` would close a cycle.
 
@@ -948,7 +952,7 @@ def check_import_cycle(key: str) -> None:
     names = _import_stack[_import_stack.index(key):] + [key]
     lines = ["import cycle not allowed:"]
     lines += [f"\t{a} imports {b}" for a, b in zip(names, names[1:])]
-    raise ImportError("\n".join(lines))
+    raise ImportCycleError("\n".join(lines))
 
 
 _PRELUDE_TREE: "ast.Program | None" = None
@@ -1051,11 +1055,21 @@ def wildcard_exports(mod) -> "frozenset | None":
     return None
 
 
-def import_module(path_segments, roots=None, dynamic: bool = True) -> Module:
+def import_module(path_segments, roots=None, dynamic: bool = True,
+                  prefix: bool = False) -> Module:
     """Loads (or returns the already-cached) module for a `mod::sub::leaf`
     path. Parent packages are loaded first (so `import std::io` runs
     std/__init__.wy before std/io.wy) and register the child on their
-    `.submodules`, matching Python's own import order and behavior.
+    `.submodules`, matching Python's own import order and behavior. A
+    namespace package (a directory with no __init__.wy) loads as a Module
+    with no file and no code.
+
+    `prefix` is true when this call is loading a parent on the way to a
+    child. A parent that is still running its own top level is then passed
+    through, not reported as a cycle (project design/modules.md M1): it is
+    what lets a package's __init__.wy import its own children, and a child
+    import a sibling while the package initialises. Only the whole path of
+    an import can close a cycle.
 
     `dynamic` is exposed to the module's own top level as `__dynamic__` -
     `false` for `import static a::b`, `true` for a plain `import a::b`
@@ -1080,20 +1094,32 @@ def import_module(path_segments, roots=None, dynamic: bool = True) -> Module:
     path_segments = tuple(path_segments)
     key = "::".join(path_segments)
     if key in _module_cache:
-        check_import_cycle(key)
         mod = _module_cache[key]
+        if prefix and key in _import_stack:
+            return mod
+        check_import_cycle(key)
         bind("__dynamic__", dynamic, mod.ctx)
         return mod
 
     parent = None
     if len(path_segments) > 1:
-        parent = import_module(path_segments[:-1], roots, dynamic)
+        parent = import_module(path_segments[:-1], roots, dynamic, prefix=True)
 
-    resolved = wyrm_modules.resolve_module_file(path_segments, roots)
+    resolved = wyrm_modules.resolve_module(path_segments, roots)
     if resolved is None:
         searched = roots if roots is not None else wyrm_modules.search_paths()
-        raise ImportError(f"no module named {key!r} (searched: {', '.join(searched)})")
-    file_path, is_package = resolved
+        raise ModuleNotFoundError(f"no module named {key!r} (searched: {', '.join(searched)})", name=key)
+    if resolved.file is None:
+        # A namespace package: nothing to run, and nothing of its own to
+        # offer `import key::*` - only the children imported off it.
+        mod = Module(key, None, Scope(), True)
+        bind_new("__name__", key, mod.ctx)
+        mod.declared_names = frozenset()
+        _module_cache[key] = mod
+        if parent is not None:
+            parent.submodules[path_segments[-1]] = mod
+        return mod
+    file_path, is_package = resolved.file, resolved.is_package
 
     # Same AST cache cli.py uses for the top-level script (wypoc/cache.py) -
     # a hit (source unchanged since last run, by mtime) skips tokenizing and
@@ -1213,8 +1239,11 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
 
     try:
         target = import_module(real_path, dynamic=dynamic)
-    except ImportError:
-        if len(real_path) < 2:
+    except ModuleNotFoundError as e:
+        # Only "this path names no module" falls back to a member; an
+        # import error from inside the module's own body (a cycle, a
+        # missing import of its own) is that module's, not this one's.
+        if len(real_path) < 2 or e.name != "::".join(real_path):
             raise
         parent = import_module(real_path[:-1], dynamic=dynamic)
         _import_one(stmt.path[-1], stmt.alias or stmt.path[-1], parent, ctx)
@@ -2237,6 +2266,10 @@ def scope_value(obj, name: str):
     if isinstance(obj, Module):
         if name in obj.submodules:
             return obj.submodules[name]
+        if obj.name in _import_stack:
+            # Reached by passing through it on the way to a child (M1): its
+            # children are navigable, its own members aren't there yet.
+            raise ImportError(f"{obj.name}::{name}: {obj.name!r} is still initialising")
         return lookup(name, obj.ctx)
     raise NotImplementedError(f"'::' is only supported on modules right now (got {type(obj).__name__})")
 

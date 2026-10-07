@@ -151,6 +151,21 @@ a module boundary. `class A(foo::B)` in one module and `class B(bar::A)` in
 another is now a compile error. The remedies are Go's - merge the two
 modules, or hoist the shared piece into a third that both import.
 
+**One exception: passing through a package** (project `design/modules.md`
+M1). Importing `a::b::c` runs `a`'s and `a::b`'s `__init__.wy` first, as
+Python does. A package on that path that is still running its own body is
+passed through rather than reported, so a package can import, and re-export,
+its own children:
+
+    # pkg/__init__.wy
+    import pkg::impl::(compile)
+
+Only the whole path of an import can close a cycle: `import pkg` from inside
+`pkg::impl` is still one. While the package is initialising, its children
+are reachable through `pkg::`, but reading one of its own members is an
+error ("'pkg' is still initialising"), so no module ever sees a half-built
+one.
+
 Cycle detection lives in one walk: `check_imports` already walks every
 import transitively to resolve it to a file. Detection is that walk with a
 visiting-stack instead of a flat visited set, so `--check` shares one

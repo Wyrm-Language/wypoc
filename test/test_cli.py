@@ -483,3 +483,59 @@ def test_an_except_list_removes_a_name_from_the_collision(tmp_path):
     r = run(script)
     assert r.returncode == 0, f"stderr={r.stderr!r}"
     assert r.stdout.strip() == "from-b"
+
+
+# --------------------------------------------------------------------------
+# packages under --check (project design/modules.md M1)
+
+
+def _write_tree(root, files: dict):
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return root
+
+
+def test_check_accepts_a_package_importing_its_own_child(tmp_path):
+    _write_tree(tmp_path, {
+        "pkg/__init__.wy": "import pkg::impl::(compile)\n",
+        "pkg/impl.wy": "import pkg::helpers\nfn compile(x):\n    return x\n",
+        "pkg/helpers.wy": "",
+        "main.wy": "import pkg\n",
+    })
+    r = run("--check", str(tmp_path / "main.wy"))
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+
+
+def test_check_reports_a_child_importing_its_own_package(tmp_path):
+    _write_tree(tmp_path, {
+        "pkg/__init__.wy": "import pkg::child\n",
+        "pkg/child.wy": "import pkg\n",
+        "main.wy": "import pkg\n",
+    })
+    r = run("--check", str(tmp_path / "main.wy"))
+    assert r.returncode == 1
+    assert "pkg imports pkg::child" in r.stderr
+    assert "pkg::child imports pkg" in r.stderr
+
+
+def test_check_walks_the_packages_on_an_import_path(tmp_path):
+    """Importing pkg::child runs pkg/__init__.wy first, so --check reads it."""
+    _write_tree(tmp_path, {
+        "pkg/__init__.wy": "import nowhere\n",
+        "pkg/child.wy": "",
+        "main.wy": "import pkg::child\n",
+    })
+    r = run("--check", str(tmp_path / "main.wy"))
+    assert r.returncode == 1
+    assert "no module named 'nowhere'" in r.stderr
+
+
+def test_check_accepts_a_namespace_package(tmp_path):
+    _write_tree(tmp_path, {
+        "ns/leaf.wy": "",
+        "main.wy": "import ns\nimport ns::leaf\n",
+    })
+    r = run("--check", str(tmp_path / "main.wy"))
+    assert r.returncode == 0, f"stderr={r.stderr!r}"

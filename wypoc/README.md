@@ -231,11 +231,15 @@ in scope (not just via `this.slot`) - see `call_overload`'s docstring.
 `wyrm_eval_parse_tree.py`): `WYRM_PATH` (colon-separated, like `PYTHONPATH`)
 is searched in order, with `wypoc/corelib/` (derived at runtime from
 `wypoc`'s own installed location, not hardcoded) as the final fallback.
-`import std::io` looks for
-`<root>/std/io.wy`; `import std` (a directory) looks for
-`<root>/std/__init__.wy`, mirroring Python's package convention exactly
-(including loading parent packages before children, and registering
-children onto their parent's `.submodules`). Path resolution itself
+Resolution follows Python's `FileFinder`: `import std` is
+`<root>/std/__init__.wy` (a package), else `<root>/std.wy` (a module), else a
+bare `<root>/std/` directory (a namespace package with no code, which may span
+several roots). `import std::io` then looks for `io` only in the directories
+`std` resolved to. Parent packages load before children, and children are
+registered on their parent's `.submodules`. A package still running its own
+`__init__.wy` is passed through, not treated as a cycle, so it can import and
+re-export its own children (`doc/addendum.md`, "Import cycles are illegal").
+Path resolution itself
 (`wyrm_modules.py`) has no dependency on the parser/evaluator, specifically
 to avoid an import cycle with `wyrm_eval_parse_tree.py`.
 
@@ -485,6 +489,7 @@ Or a single file:
 | `test_eval_messages.py` | The full `!` story: class-body method auto-registration, plain-fn-to-Method promotion, single- vs. tuple-receiver `this` binding, bare-slot-name access in method bodies, left-to-right most-specific-wins resolution, `BoundMessage`. |
 | `test_eval_builtins.py` | `expose`/`expose_all`/`builtin` - handing Python callables/values to wyrm code. |
 | `test_eval_modules.py` | `WYRM_PATH` resolution (default + override), package `__init__.wy` loading, `::` module/submodule access, `from ... import`, `import`'s wildcard and aliased-single-name forms. |
+| `test_packages.py` | Package resolution order (package, module, namespace package across roots), a package importing and re-exporting its own children, and the cycle and still-initialising errors around them. |
 | `test_eval_io.py` | `wyrm_io.py`'s primitives: write/read round-trip, `lseek`, `dup2` handle aliasing (shared file position), `close`/`flush`, and that a closed handle raises. |
 | `test_cli.py` | The *installed* `wyrm` console script via `subprocess` - arg packing (including args that look like flags), every exit-code/error path, and the bare-`wyrm` REPL driven over a pipe (including `--tui`'s fallback off a terminal), plus `--config` as a mode of its own (writing options, listing them, refusing to be combined with something to run) and a configured `tui`/`compact` reaching the REPL. Skipped if the `wyrm` console script isn't installed. |
 | `test_pretty.py` | `pretty.py`: a pair list as lisp (including an improper tail), dicts/arrays in JSON layout, a class instance always rendering as a block in its definition's shape (and a container holding one having to break), where the breaks and indentation land at a given width, and the fallback to the one-line spelling for everything else. |

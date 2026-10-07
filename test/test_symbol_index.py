@@ -99,7 +99,8 @@ def test_ambiguous_leaf_falls_back_to_a_symbol(index, root):
 
 def test_ambiguous_leaf_prefers_a_real_module(index, root):
     """When both readings are possible, the module wins - again matching
-    eval_import, which only falls back to a symbol on ImportError."""
+    eval_import, which only falls back to a symbol when the path names no
+    module."""
     target = only_target(index, "import util::helpers\n", "helpers")
     assert target.symbol is None and target.span == (1, 0, 1, 0)
 
