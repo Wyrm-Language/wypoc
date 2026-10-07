@@ -99,3 +99,12 @@ def test_a_definition_replaces_an_import_rather_than_assigning_through_it(root, 
     ctx = _run(source + "import counter\nw := counter::bump()\n")
     assert _value(ctx, "v") == 99
     assert _value(ctx, "w") == 1
+
+
+def test_two_wildcards_passing_on_one_module_agree(root):
+    _tree(root, {
+        "left.wy": "import counter\n",
+        "right.wy": "import counter\n",
+    })
+    ctx = _run("import left::*\nimport right::*\nv := counter::count\n")
+    assert _value(ctx, "v") == 0

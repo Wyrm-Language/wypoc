@@ -1344,6 +1344,10 @@ def _merge_wildcard_name(name: str, cell, source: str, ctx: dict) -> None:
     target = cell.target if isinstance(cell, ImportedBinding) else cell
     if isinstance(existing, ImportedBinding) and existing.target is target:
         return
+    # A module binding names the module itself: two wildcards that both
+    # pass on `std` (each did `import std::io`) agree.
+    if isinstance(unwrap(existing), Module) and unwrap(existing) is unwrap(cell):
+        return
     if isinstance(unwrap(existing), AmbiguousName):
         return
     ambiguous = Variable(AmbiguousName(name, origin, source))
