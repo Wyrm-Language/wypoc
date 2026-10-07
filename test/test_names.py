@@ -81,3 +81,11 @@ def test_an_import_is_refused_before_the_module_runs(root):
     _tree(root, {"typo.wy": "println(\"typo ran\")\nx := undefined_thing\n"})
     with pytest.raises(names.NameCheckError, match="undefined name 'undefined_thing'"):
         eval_program(parse("import typo\n"), {})
+
+
+def test_module_exports_lists_what_a_wildcard_offers(root):
+    """wyrm-v0's compiler reads its dependencies' exports through this."""
+    from wypoc.wyrm_builtins import is_error, module_exports
+    assert module_exports("palette") == ["mix", "red"]
+    assert module_exports("shades") == ["mix", "red"], "re-exports count"
+    assert is_error(module_exports("nowhere"))

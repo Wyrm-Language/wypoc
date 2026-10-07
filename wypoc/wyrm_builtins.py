@@ -969,6 +969,20 @@ def help_(value=None) -> None:
     wyrm_io.wyrm_write(wyrm_io.STDOUT, "\n".join(_help_lines(value)) + "\n")
 
 
+def module_exports(path):
+    """`module_exports(path)`: the names module `path` (a `"a::b"` string)
+    exports, sorted - what an `import path::*` offers, read without running
+    the module (project design/modules.md M2). wyrm-v0's compiler places
+    every name before a module runs and reads its dependencies' exports
+    through this; here it is the static reading `names.exports` makes. An
+    error value when the module can't be found."""
+    from wypoc import names, wyrm_modules
+    segments = str(path).split("::")
+    if wyrm_modules.resolve_module(segments) is None:
+        return error(f"module_exports: no module named {str(path)!r}")
+    return sorted(names.exports(segments, None))
+
+
 def install(ctx: dict) -> None:
     """Expose str/int/float/bool, cons/pair/car/cdr/reverse/nreverse, tuple,
     nil, copy, len, print, println, end, exit, resolve, and help as
@@ -1032,6 +1046,7 @@ def install(ctx: dict) -> None:
         # `sexpr(foo::$ast)` does. Plain (not contextual): unlike sexpr, it
         # never needs the calling scope.
         parse=parse_source,
+        module_exports=module_exports,
     )
     install_native_decorators(ctx)
     register_native_method("substr", substr, ctx)
