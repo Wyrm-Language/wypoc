@@ -172,6 +172,28 @@ visiting-stack instead of a flat visited set, so `--check` shares one
 implementation with cycle reporting and the tree walker enforces the same
 rule at `import` time.
 
+## Imported names share the exporter's binding
+
+**Status: implemented** (project `design/modules.md` M2).
+
+Implementation: `wyrm_eval_parse_tree.ImportedBinding`, made by `_import_one`
+and `_merge_wildcard_name`.
+
+`import m::(x)`, `import m::(x as y)` and `import m::*` bind the importer's
+name to `m`'s own binding, not to a copy of its value: Lisp semantics, as an
+imported symbol in a Common Lisp package or an imported identifier in a
+Scheme library. So:
+
+- a read sees `m`'s current value, including one `m` assigns after the
+  import (`import counter::(count, bump)`, then `bump()`, then `count` reads
+  the new count);
+- assigning an imported name is an error - only the module that defines a
+  name assigns it, Scheme's rule rather than Common Lisp's `setf`;
+- a re-exported name is the original binding: a package whose `__init__.wy`
+  says `import pkg::impl::(compile)` exports `pkg::impl`'s own `compile`,
+  and two wildcards that reach it through different packages agree on it
+  rather than colliding.
+
 ## Wildcard ambiguity is an error at the point of use
 
 **Status: implemented**, except that the diagnostic is raised when the name is

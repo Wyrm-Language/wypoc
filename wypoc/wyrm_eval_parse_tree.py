@@ -108,6 +108,44 @@ class Variable:
         return f"Variable({self.value!r})"
 
 
+class ImportedBinding(Variable):
+    """An imported name (project design/modules.md M2): the importer's view
+    of the exporting module's own binding, not a copy of its value - Lisp
+    semantics, as an imported symbol in a Common Lisp package or an imported
+    identifier in a Scheme library. Reading follows the exporter's cell, so
+    a later assignment there is seen here; assigning through it is an error,
+    since only the defining module assigns its names (Scheme's rule).
+
+    `target` is always the defining module's own cell: re-exporting an
+    imported name (a package's __init__.wy importing a child's names) hands
+    on the original binding, never a chain of these."""
+
+    __slots__ = ("target", "name", "owner", "wildcard_source")
+
+    def __init__(self, target: Variable, name: str, owner: str):
+        if isinstance(target, ImportedBinding):
+            target = target.target
+        self.target = target
+        self.name = name
+        self.owner = owner
+
+    @property
+    def value(self):
+        return self.target.value
+
+    @value.setter
+    def value(self, _value):
+        raise NameError(f"cannot assign to {self.name!r}: it is imported from "
+                        f"'{self.owner}', and only '{self.owner}' assigns it")
+
+    @property
+    def immutable(self):
+        return False
+
+    def __repr__(self):
+        return f"ImportedBinding({self.owner}::{self.name})"
+
+
 class Scope(dict):
     """A lexical scope: this level's own `var`-declared bindings (name ->
     Variable), plus an optional parent scope to search when a name isn't
@@ -1222,7 +1260,7 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
                 if (isinstance(name, str) and not name.startswith("__")
                         and name not in excluded
                         and (offered is None or name in offered)):
-                    _merge_wildcard_name(name, unwrap(var), mod.name, ctx)
+                    _merge_wildcard_name(name, var, mod.name, ctx)
             dest_messages = message_table(ctx)
             local_owner = None
             try:
@@ -1256,7 +1294,14 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
         bind_new(stmt.path[0], _module_cache[stmt.path[0]], ctx)
 
 
-def _merge_wildcard_name(name: str, value, source: str, ctx: dict) -> None:
+def _owner_of(cell, module_name: str) -> str:
+    """The module that defines the binding `cell`, as seen from
+    `module_name` (where it was found): a re-exported name belongs to the
+    module that defined it, not the one that passed it on."""
+    return cell.owner if isinstance(cell, ImportedBinding) else module_name
+
+
+def _merge_wildcard_name(name: str, cell, source: str, ctx: dict) -> None:
     """Bring one name from `import source::*` into `ctx`, per the layered
     precedence in doc/addendum.md.
 
@@ -1269,23 +1314,31 @@ def _merge_wildcard_name(name: str, value, source: str, ctx: dict) -> None:
     - Here without a tag: layer 1 got there first (a local definition, or an
       explicit/aliased import). It wins, silently; that is the escape hatch
       the ambiguity error points at.
-    - Here with a tag, same value: two wildcards that reached the same
-      canonical object, or the same import twice. A no-op, not a collision.
-    - Here with a tag, different value: a real collision between two layer-2
-      imports. Neither wins - reading the name is an error until something in
-      layer 1 shadows it.
+    - Here with a tag, same binding: two wildcards that reached the same
+      defining module's binding (one re-exporting the other), or the same
+      import twice. A no-op, not a collision.
+    - Here with a tag, a different binding: a real collision between two
+      layer-2 imports. Neither wins - reading the name is an error until
+      something in layer 1 shadows it.
+
+    What gets bound is the exporter's own cell, shared, not a copy of its
+    value (design/modules.md M2) - see ImportedBinding.
     """
+    if not isinstance(cell, Variable):
+        cell = Variable(cell)
     existing = dict.get(ctx, name)
     if existing is None:
-        var = Variable(value)
+        var = ImportedBinding(cell, name, _owner_of(cell, source))
         var.wildcard_source = source
         ctx[name] = var
         return
     origin = getattr(existing, "wildcard_source", None)
     if origin is None:
         return
-    current = unwrap(existing)
-    if current is value or isinstance(current, AmbiguousName):
+    target = cell.target if isinstance(cell, ImportedBinding) else cell
+    if isinstance(existing, ImportedBinding) and existing.target is target:
+        return
+    if isinstance(unwrap(existing), AmbiguousName):
         return
     ambiguous = Variable(AmbiguousName(name, origin, source))
     ambiguous.wildcard_source = source
@@ -1378,8 +1431,15 @@ def _import_one(name: str, dest_name: str, mod: "Module", ctx: dict) -> None:
     """Imports a single name from `mod` into `ctx` as `dest_name`, checking
     the variable namespace first and the message namespace second - see
     message_table's docstring on why they're separate tables now."""
-    if name in mod.ctx:
-        bind_new(dest_name, lookup(name, mod.ctx), ctx)
+    cell = mod.ctx.get_cell(name) if isinstance(mod.ctx, Scope) else dict.get(mod.ctx, name)
+    if cell is not None:
+        # The exporter's own binding, shared (design/modules.md M2) - unless
+        # it was a cell nobody could share (a host-exposed plain value).
+        if isinstance(cell, Variable):
+            lookup(name, mod.ctx)  # an ambiguous or unset export is an error here, as before
+            ctx[dest_name] = ImportedBinding(cell, name, _owner_of(cell, mod.name))
+        else:
+            bind_new(dest_name, cell, ctx)
         return
     method = message_table(mod.ctx).get(name)
     if method is None:
