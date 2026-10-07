@@ -67,6 +67,7 @@ wypoc/
   wyrm_modules.py      WYRM_PATH search-path resolution
   wyrm_io.py           POSIX-ish low-level I/O primitives exposed to wyrm
   symbols.py           static symbol table for one parsed module (no eval, no I/O)
+  names.py             every name placed before a module runs (design modules.md M2)
   symbol_index.py      cross-file symbol lookup — follows imports to their files
   completion.py        completion candidates for a position; reads its context
                         from raw text so it works on source that doesn't parse

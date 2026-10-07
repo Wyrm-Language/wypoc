@@ -36,6 +36,8 @@ tools/generate_parser.py  regenerates parser.py from wyrm.gram
   wyrm_modules.py         WYRM_PATH search-path resolution (no eval/parse dependency)
   wyrm_io.py              POSIX-ish low-level I/O primitives (__open/__read/...)
   symbols.py              static symbol table for one parsed module
+  names.py                every name placed before a module runs (undefined
+                          names, used wildcard collisions): design modules.md M2
   symbol_index.py         cross-file symbol lookup (following imports)
   completion.py           completion candidates for a position (see below)
   cli.py                  the `wyrm` command (installed via pyproject.toml)
@@ -491,6 +493,8 @@ Or a single file:
 | `test_eval_builtins.py` | `expose`/`expose_all`/`builtin` - handing Python callables/values to wyrm code. |
 | `test_eval_modules.py` | `WYRM_PATH` resolution (default + override), package `__init__.wy` loading, `::` module/submodule access, `from ... import`, `import`'s wildcard and aliased-single-name forms. |
 | `test_packages.py` | Package resolution order (package, module, namespace package across roots), a package importing and re-exporting its own children, and the cycle and still-initialising errors around them. |
+| `test_shared_bindings.py` | Imported names share the exporter's binding (design modules.md M2): later assignments seen, assignment through an import refused, re-exports are the original binding, a definition replaces an import. |
+| `test_names.py` | `names.py`: undefined names and used wildcard collisions reported before a module runs. |
 | `test_eval_io.py` | `wyrm_io.py`'s primitives: write/read round-trip, `lseek`, `dup2` handle aliasing (shared file position), `close`/`flush`, and that a closed handle raises. |
 | `test_cli.py` | The *installed* `wyrm` console script via `subprocess` - arg packing (including args that look like flags), every exit-code/error path, and the bare-`wyrm` REPL driven over a pipe (including `--tui`'s fallback off a terminal), plus `--config` as a mode of its own (writing options, listing them, refusing to be combined with something to run) and a configured `tui`/`compact` reaching the REPL. Skipped if the `wyrm` console script isn't installed. |
 | `test_pretty.py` | `pretty.py`: a pair list as lisp (including an improper tail), dicts/arrays in JSON layout, a class instance always rendering as a block in its definition's shape (and a container holding one having to break), where the breaks and indentation land at a given width, and the fallback to the one-line spelling for everything else. |

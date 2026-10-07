@@ -131,9 +131,19 @@ def test_syntax_error_exits_1(tmp_path):
 
 def test_runtime_error_exits_1(tmp_path):
     boom = tmp_path / "boom.wy"
-    boom.write_text("x = undefined_name\n")
+    boom.write_text("x := 1\ny := x()\n")
     r = run(str(boom))
-    assert r.returncode == 1 and "NameError" in r.stderr
+    assert r.returncode == 1 and "TypeError" in r.stderr
+
+
+def test_an_undefined_name_is_reported_before_anything_runs(tmp_path):
+    """design/modules.md M2: every name is placed before the module runs."""
+    boom = tmp_path / "boom.wy"
+    boom.write_text("println(\"ran\")\nx := undefined_name\n")
+    r = run(str(boom))
+    assert r.returncode == 1
+    assert "2:6: undefined name 'undefined_name'" in r.stderr
+    assert "ran" not in r.stdout
 
 
 # --------------------------------------------------------------------------
@@ -539,3 +549,13 @@ def test_check_accepts_a_namespace_package(tmp_path):
     })
     r = run("--check", str(tmp_path / "main.wy"))
     assert r.returncode == 0, f"stderr={r.stderr!r}"
+
+
+def test_check_reports_an_undefined_name_in_an_imported_file(tmp_path):
+    _write_tree(tmp_path, {
+        "lib.wy": "x := missing_name\n",
+        "main.wy": "import lib\n",
+    })
+    r = run("--check", str(tmp_path / "main.wy"))
+    assert r.returncode == 1
+    assert "lib.wy:1:6: undefined name 'missing_name'" in r.stderr

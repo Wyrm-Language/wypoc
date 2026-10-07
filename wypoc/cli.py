@@ -93,6 +93,7 @@ import traceback
 from wypoc import ast_nodes as ast
 from wypoc import cache as cache_mod
 from wypoc import config as config_mod
+from wypoc import names as names_mod
 from wypoc import project as project_mod
 from wypoc import wyrm_dbus
 from wypoc import wyrm_modules
@@ -143,6 +144,10 @@ def write_config(assignments: list) -> int:
         print(f"{name} = {str(value).lower() if isinstance(value, bool) else value}"
               f"  ({config_mod.config_path()})")
     return 0
+
+
+# Names a host binds in every module before it runs (cli's own `__ARGS`).
+HOST_NAMES = frozenset({"__ARGS"})
 
 
 def _check_file(file_path: str, roots: "list | None",
@@ -207,6 +212,9 @@ def check_imports(filename: str, tree, roots: "list | None",
     design/modules.md M1)."""
     if stack is None:
         stack = [(filename, _module_spelling(filename))]
+    # Every name placed before anything runs (design/modules.md M2).
+    for e in names_mod.check_names(tree, roots, filename, known=HOST_NAMES):
+        errors.append(f"{filename}:{e}")
     for node in tree.walk():
         if isinstance(node, ast.Import):
             path_segments = list(node.path)
@@ -581,6 +589,17 @@ def main(argv: list = None) -> int:
         except wyrm_dbus.DbusError as e:
             print(f"wyrm: --dbus-session: {e}", file=sys.stderr)
             return 1
+
+    # Every name placed before anything runs (design/modules.md M2): the
+    # host's own names and the preamble's count as defined.
+    known = {k for k in dict.keys(ctx) if isinstance(k, str)}
+    if preamble_tree is not None:
+        known |= names_mod.bound_names(preamble_tree)
+    name_errors = names_mod.check_names(tree, None, filename, known=known)
+    if name_errors:
+        for e in name_errors:
+            print(f"wyrm: {filename}:{e}", file=sys.stderr)
+        return 1
 
     try:
         if preamble_tree is not None:

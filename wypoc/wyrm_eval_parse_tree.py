@@ -41,6 +41,7 @@ from dataclasses import fields as _dc_fields
 
 from wypoc import ast_nodes as ast
 from wypoc import cache as cache_mod
+from wypoc import names as names_mod
 from wypoc import sexpr
 from wypoc import wyrm_builtins
 from wypoc import wyrm_modules
@@ -1176,6 +1177,11 @@ def import_module(path_segments, roots=None, dynamic: bool = True,
         tree = parse(src)
         cache_mod.save(file_path, tree)
 
+    # Every name placed before the module runs (design/modules.md M2).
+    name_errors = names_mod.check_names(tree, roots, file_path, known=("__ARGS",))
+    if name_errors:
+        raise name_errors[0]
+
     module_ctx = Scope()
     populate_globals(module_ctx, name=key)
     bind("__dynamic__", dynamic, module_ctx)
@@ -1786,6 +1792,18 @@ def bind(name: str, value, ctx: dict) -> None:
         existing.value = value
     else:
         ctx[name] = Variable(value)
+
+
+def bind_definition(name: str, value, ctx: dict) -> None:
+    """Bind a `fn`/`co`/`class` definition. A definition is the module's own
+    (layer 1, doc/addendum.md), so it replaces an imported binding in this
+    scope rather than assigning through it - an imported name is the
+    exporter's to assign (design/modules.md M2). Anything else is bound as
+    `bind` does: a redefinition updates the same cell."""
+    if isinstance(ctx.get(name), ImportedBinding):
+        ctx[name] = Variable(value)
+        return
+    bind(name, value, ctx)
 
 
 def bind_new(name: str, value, ctx: dict) -> None:
@@ -3338,7 +3356,7 @@ def register_overload(name: str, signature, node, closure: dict, target_ctx: dic
         # docstring.
         method = None
     if signature is None and method is None:
-        bind(name, Function(name, node, closure), target_ctx)
+        bind_definition(name, Function(name, node, closure), target_ctx)
         return
     if method is None:
         owner = None
@@ -3364,7 +3382,7 @@ def register_overload(name: str, signature, node, closure: dict, target_ctx: dic
         # top-level `fn name`) would only be reachable via `!`, while the
         # opposite definition order left it plain-callable too - an
         # order-dependent asymmetry rather than a real distinction.
-        bind(name, Function(name, node, closure), target_ctx)
+        bind_definition(name, Function(name, node, closure), target_ctx)
     method.add_overload(signature, node, closure)
 
 
@@ -4146,13 +4164,13 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
         # CoDef branch); a bare `co name(...)` is a plain callable
         # coroutine factory instead (see call_value's Coroutine branch).
         if stmt.class_target is None:
-            bind(stmt.name, Coroutine(stmt.name, stmt, ctx), ctx)
+            bind_definition(stmt.name, Coroutine(stmt.name, stmt, ctx), ctx)
         else:
             signature = tuple(_lookup_class(n, ctx) for n in stmt.class_target)
             register_overload(stmt.name, signature, stmt, ctx, ctx)
         return
     if isinstance(stmt, ast.ClassDef):
-        bind(stmt.name, make_class(stmt.name, stmt, ctx), ctx)
+        bind_definition(stmt.name, make_class(stmt.name, stmt, ctx), ctx)
         return
     if isinstance(stmt, ast.SlotDef):
         # A module-level slot parses (design syntax.md G0/B6); what it

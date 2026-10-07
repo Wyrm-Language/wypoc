@@ -87,3 +87,15 @@ def test_two_wildcards_with_different_bindings_are_ambiguous_when_read(root):
     })
     with pytest.raises(NameError, match="ambiguous name 'count'"):
         _run("import left::*\nimport right::*\nv := count\n")
+
+
+@pytest.mark.parametrize("source", [
+    "import counter::*\nfn bump():\n    return 99\nv := bump()\n",
+    "import counter::(bump)\nfn bump():\n    return 99\nv := bump()\n",
+])
+def test_a_definition_replaces_an_import_rather_than_assigning_through_it(root, source):
+    """A local definition is layer 1 (doc/addendum.md): it shadows the import
+    in this module and leaves the exporter's binding alone."""
+    ctx = _run(source + "import counter\nw := counter::bump()\n")
+    assert _value(ctx, "v") == 99
+    assert _value(ctx, "w") == 1

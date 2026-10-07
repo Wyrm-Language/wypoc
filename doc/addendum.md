@@ -188,7 +188,9 @@ Scheme library. So:
   import (`import counter::(count, bump)`, then `bump()`, then `count` reads
   the new count);
 - assigning an imported name is an error - only the module that defines a
-  name assigns it, Scheme's rule rather than Common Lisp's `setf`;
+  name assigns it, Scheme's rule rather than Common Lisp's `setf`. A `fn`,
+  `co` or `class` definition of the same name is not an assignment: it is
+  the module's own (layer 1, below) and replaces the import in that module;
 - a re-exported name is the original binding: a package whose `__init__.wy`
   says `import pkg::impl::(compile)` exports `pkg::impl`'s own `compile`,
   and two wildcards that reach it through different packages agree on it
@@ -247,8 +249,11 @@ any module in it runs, so this *could* be a compile-time diagnostic:
 a whole-program build would know each dependency's export set and could
 refuse the ambiguous program outright.
 
-**It is not one yet.** A single parsed program never loads a dependency, so
-the collision is detected when the name is filled and reported when the name
-is read. The observable rule is the one this section describes either way;
-what moves, when a whole-program build exists, is only how early the error
-arrives.
+**It is one now** (project `design/modules.md` M2): `wypoc/names.py` reads
+each wildcard dependency's top-level definitions, traced to the module that
+defines each, and reports a used collision before the module runs - when it
+is imported, before a script's first statement, and under `--check`. The
+same pass reports an undefined name. It errs towards silence (see its
+docstring): a name bound anywhere in the module counts as defined, and a
+dependency it can't read turns the undefined-name check off. The run-time
+detection above stays as the backstop.
