@@ -70,7 +70,7 @@ def test_module_and_package_objects(ctx):
     shapes = ctx["shapes"].value
     std = ctx["std"].value
     assert isinstance(shapes, Module) and shapes.name == "shapes", "import shapes -> a single-file module"
-    assert isinstance(std, Module) and std.is_package, "import std::io -> std is a package (has __init__.wy)"
+    assert isinstance(std, Module) and std.is_package, "import std::io -> std is a package (a namespace package: no __init__.wy)"
     assert "io" in std.submodules, "importing std::io registers io as a submodule of std"
 
 

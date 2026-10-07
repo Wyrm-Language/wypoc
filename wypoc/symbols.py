@@ -373,8 +373,9 @@ class _Builder:
                 detail=detail, container=container))
         segments = tuple(node.path)
         spans = node.path_pos or [None] * len(segments)
-        # Every path segment is separately navigable: `std` in
-        # `import std::io` goes to std/__init__.wy, `io` to std/io.wy.
+        # Every path segment is separately navigable: `pkg` in
+        # `import pkg::io` goes to pkg/__init__.wy, `io` to pkg/io.wy. A
+        # namespace package (no __init__.wy) has no file to go to.
         for index, (name, span) in enumerate(zip(segments, spans)):
             is_leaf = index == len(segments) - 1
             self.imports.append(ImportBinding(

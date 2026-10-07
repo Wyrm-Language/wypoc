@@ -1,4 +1,0 @@
-# std package init. Presence of this file (rather than a bare std.wy) is
-# what makes `import std` resolve `std` as a package, per Python's own
-# package convention - see wypoc/wyrm_modules.py.
-pass

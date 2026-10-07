@@ -326,9 +326,10 @@ documented shape and each failure mode.
 ### `corelib/` and the `wyrm` command
 
 `wypoc/corelib/` is a small standard library written in wyrm, demonstrating
-the module system: `shapes.wy` (single-file module), `std/__init__.wy`
-(package marker), `std/io.wy` (a submodule, using the `!`-less plain-`fn`
-form - `println`). `prelude.wy` is the one exception to "reached via
+the module system: `shapes.wy` (single-file module), `std/` (a namespace
+package: a directory with no `__init__.wy`, so another search root can add
+modules to `std` too), `std/io.wy` (a submodule, using the `!`-less
+plain-`fn` form - `println`). `prelude.wy` is the one exception to "reached via
 `import`" - it's parsed once and run into every fresh scope directly by
 `populate_globals` (`wyrm_eval_parse_tree.py`), the same way the
 Python-level builtins (`car`/`cdr`/`substr`/...) are, so its definitions
