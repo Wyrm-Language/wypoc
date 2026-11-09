@@ -66,6 +66,9 @@ wypoc/
                         printer `--dump-ast`, `str()` and the REPL share)
   wyrm_modules.py      WYRM_PATH search-path resolution
   wyrm_io.py           POSIX-ish low-level I/O primitives exposed to wyrm
+  wyrm_expand.py       what wyrm-v0's self-hosted compiler needs to run from source
+                        here, so wypoc can generate its embedded images (std::expand,
+                        bind_message, tree_box, `__parse_tree`)
   symbols.py           static symbol table for one parsed module (no eval, no I/O)
   names.py             every name placed before a module runs (design modules.md M2)
   symbol_index.py      cross-file symbol lookup — follows imports to their files

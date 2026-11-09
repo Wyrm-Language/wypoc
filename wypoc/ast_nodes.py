@@ -54,6 +54,19 @@ def _is_pos_field(name: str) -> bool:
     return name == "pos" or name.endswith("_pos")
 
 
+_child_fields_cache: dict = {}
+
+
+def _child_fields(cls) -> tuple:
+    """The fields of node class `cls` that may hold children. Cached per class:
+    `fields()` is slow, and walking a tree asks once per node."""
+    names = _child_fields_cache.get(cls)
+    if names is None:
+        names = tuple(f.name for f in fields(cls) if not _is_pos_field(f.name))
+        _child_fields_cache[cls] = names
+    return names
+
+
 def _is_hidden_field(name: str) -> bool:
     """Fields __str__ leaves out - position spans (too noisy) and `doc`
     (can be many lines of prose, would drown out the tree shape the same
@@ -106,10 +119,8 @@ class Node:
         Lets a consumer walk the tree generically - which is what a symbol
         table or a position-to-node lookup needs - without a visitor method
         per node type, the same way __str__ avoids a printer per node."""
-        for f in fields(self):
-            if _is_pos_field(f.name):
-                continue
-            value = getattr(self, f.name)
+        for name in _child_fields(type(self)):
+            value = getattr(self, name)
             if isinstance(value, Node):
                 yield value
             elif isinstance(value, (list, tuple)):

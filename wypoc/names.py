@@ -33,6 +33,7 @@ from .parse import parse
 _IMPLICIT = frozenset({"this", "super"})
 
 _tree_cache: dict = {}
+_facts_cache: dict = {}
 _builtin_names: "frozenset | None" = None
 
 
@@ -108,6 +109,22 @@ def _wildcards(tree) -> list:
     return [node for node in tree.walk() if isinstance(node, ast.Import) and node.wildcard]
 
 
+def _tree_facts(file_path: str, tree) -> tuple:
+    """(bound names, wildcard imports, function statics) of a loaded module. Each
+    needs a walk of the whole tree, and every module checked asks about everything it
+    imports, transitively: without this, loading n modules walks O(n^2) trees. Don't
+    mutate what this answers."""
+    cached = _facts_cache.get(file_path)
+    if cached is None or cached[0] is not tree:
+        statics = set()
+        for stmt in _top_level(tree):
+            if isinstance(stmt, (ast.FnDef, ast.CoDef)) and not stmt.class_target:
+                statics |= _function_statics(stmt)
+        cached = (tree, bound_names(tree), _wildcards(tree), statics)
+        _facts_cache[file_path] = cached
+    return cached[1:]
+
+
 def _top_level(tree) -> list:
     out = []
     for stmt in tree.body:
@@ -130,8 +147,9 @@ def _loose_exports(path, roots, seen: set) -> "set | None":
     tree = _load_tree(resolved.file)
     if tree is None:
         return None
-    names = bound_names(tree)
-    for node in _wildcards(tree):
+    bound, wildcards, _statics = _tree_facts(resolved.file, tree)
+    names = set(bound)
+    for node in wildcards:
         more = _loose_exports(node.path, roots, seen)
         if more is None:
             return None
@@ -195,7 +213,7 @@ def image_exports(path, roots=None, seen: "set | None" = None) -> set:
     tree = _load_tree(resolved.file)
     if tree is None:
         return set()
-    out: set = set()
+    out: set = set(_tree_facts(resolved.file, tree)[2])
     for stmt in _top_level(tree):
         if isinstance(stmt, ast.VarDecl):
             out.update(target.name for target in stmt.targets)
@@ -203,7 +221,6 @@ def image_exports(path, roots=None, seen: "set | None" = None) -> set:
             out.add(stmt.name)
         elif isinstance(stmt, (ast.FnDef, ast.CoDef)) and not stmt.class_target:
             out.add(stmt.name)
-            out.update(_function_statics(stmt))
         elif isinstance(stmt, ast.Import) and stmt.wildcard:
             out.add(stmt.path[0])
             out.update(image_exports(stmt.path, roots, seen) - set(stmt.except_names or ()))

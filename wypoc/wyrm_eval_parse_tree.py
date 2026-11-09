@@ -2090,8 +2090,16 @@ def _expr_symbol(node, ctx):
     return wyrm_builtins.Symbol(node.name)
 
 
+# A literal's value never changes, and the same node evaluates over and over.
+_literal_cache: dict = {}
+
+
 def _expr_num(node, ctx):
-    return eval_number_literal(node.value)
+    text = node.value
+    value = _literal_cache.get(text)
+    if value is None:
+        value = _literal_cache[text] = eval_number_literal(text)
+    return value
 
 
 def _expr_str(node, ctx):
