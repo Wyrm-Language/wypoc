@@ -1033,7 +1033,7 @@ def populate_globals(ctx: dict, name: str = "__main__") -> None:
     Unlike Python, `__name__` is always fully qualified - there's no
     equivalent of a script run directly by relative filename ending up
     with a bare, unqualified `__name__`."""
-    from wypoc import wyrm_builtins, wyrm_dbus, wyrm_io, wyrm_nng, wyrm_socket, wyrm_sys, wyrm_term
+    from wypoc import wyrm_builtins, wyrm_dbus, wyrm_expand, wyrm_io, wyrm_nng, wyrm_socket, wyrm_sys, wyrm_term
 
     wyrm_io.install(ctx)
     wyrm_builtins.install(ctx)
@@ -1042,6 +1042,7 @@ def populate_globals(ctx: dict, name: str = "__main__") -> None:
     wyrm_socket.install(ctx)
     wyrm_nng.install(ctx)
     wyrm_sys.install(ctx)
+    wyrm_expand.install(ctx)
     eval_program(_prelude_tree(), ctx)
     expose(ctx, "__dynamic__", True)
     expose(ctx, "__name__", name)
@@ -3271,8 +3272,14 @@ def sexpr_value(ctx: dict, value):
     if isinstance(value, ClassInstance) and has_message_for("__sexpr", [value], ctx):
         return send_message("__sexpr", [value], [], {}, ctx)
     if is_tree_box(value):
-        return sexpr.encode(_fully_expanded(lookup(_TREE_SLOT, value.attrs), ctx))
+        return _encode_boxed(_fully_expanded(lookup(_TREE_SLOT, value.attrs), ctx))
     return value
+
+
+def _encode_boxed(node):
+    """What a TreeBase box holds, as a tree. It usually holds this interpreter's
+    AST; `tree_box(x)` from wyrm code boxes an s-expression, which already is one."""
+    return sexpr.encode(node) if isinstance(node, ast.Node) else node
 
 
 def _fully_expanded(node, ctx: dict):
@@ -3557,7 +3564,7 @@ def _decorator_dump(this, *args, **kwargs):
     from wypoc import wyrm_io
 
     wyrm_io.wyrm_write(wyrm_io.STDOUT, wyrm_builtins._to_str(
-        sexpr.encode(lookup(_TREE_SLOT, this.attrs))) + "\n")
+        _encode_boxed(lookup(_TREE_SLOT, this.attrs))) + "\n")
     return this
 
 
@@ -3565,7 +3572,7 @@ def _decorator_identity(this, *args, **kwargs):
     """`@__identity X` - rebuilds X's tree from its s-expression and compiles
     that, so every use is a full encode-then-decode round trip. Arguments
     are accepted and ignored."""
-    return sexpr.encode(lookup(_TREE_SLOT, this.attrs))
+    return _encode_boxed(lookup(_TREE_SLOT, this.attrs))
 
 
 def _decorator_template(this, *args, **kwargs):
@@ -3576,7 +3583,7 @@ def _decorator_template(this, *args, **kwargs):
     fails. This interpreter never lowers anything, so the definition runs
     as written, and `name::$ast` is its tree without the annotation."""
     return sexpr.node("annotate", wyrm_builtins.Symbol("template"), sexpr.node("true"),
-                      sexpr.encode(lookup(_TREE_SLOT, this.attrs)))
+                      _encode_boxed(lookup(_TREE_SLOT, this.attrs)))
 
 
 def install_native_decorators(ctx: dict) -> None:

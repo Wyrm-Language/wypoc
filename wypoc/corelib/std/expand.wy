@@ -1,0 +1,6 @@
+# Decorator expansion for a compiler running from source here, over the __expand
+# primitive (wypoc/wyrm_expand.py). wyrm-v0's std::expand has this signature and runs
+# `entry` in a throwaway VM on a compiled scope; here `scope` goes unused.
+
+fn expand(tree, scope, entry: str):
+    return __expand(tree, scope, entry)

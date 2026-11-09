@@ -87,5 +87,20 @@ def test_module_exports_lists_what_a_wildcard_offers(root):
     """wyrm-v0's compiler reads its dependencies' exports through this."""
     from wypoc.wyrm_builtins import is_error, module_exports
     assert module_exports("palette") == ["mix", "red"]
-    assert module_exports("shades") == ["mix", "red"], "re-exports count"
+    assert module_exports("shades") == ["mix", "palette", "red"], "re-exports count, and so does the binding"
     assert is_error(module_exports("nowhere"))
+
+
+def test_module_exports_answers_what_an_image_would_export(tmp_path, monkeypatch):
+    """wyrm-v0's compiler numbers slots by these names: a module exports what it binds
+    by importing, its `__` names and its functions' statics (names.image_exports)."""
+    from wypoc.wyrm_builtins import module_exports
+    (tmp_path / "leaf.wy").write_text("x := 1\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "sub.wy").write_text("y := 2\nz := 3\n")
+    (tmp_path / "top.wy").write_text(
+        "import pkg::sub::(y)\nimport leaf::*\n"
+        "fn __main():\n    pass\n\nfn count():\n    static n: int = 0\n    return n\n")
+    monkeypatch.setenv("WYRM_PATH", str(tmp_path))
+    assert module_exports("top") == sorted(
+        ["__main", "count", "count::n", "leaf", "pkg", "sub", "x", "y"])

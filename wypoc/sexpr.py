@@ -303,7 +303,11 @@ def _encode_message(tree: ast.Message):
 
 
 def _encode_message_tuple(tree: ast.MessageTupleExpr):
-    receiver = node("tuple", *[encode(i) for i in tree.items])
+    # `(a) ! m` is a parenthesized receiver, not a tuple of one: (bind_msg a m).
+    if len(tree.items) == 1:
+        receiver = encode(tree.items[0])
+    else:
+        receiver = node("tuple", *[encode(i) for i in tree.items])
     bound = node("bind_msg", receiver, Symbol(tree.name))
     if tree.args is None:
         return bound

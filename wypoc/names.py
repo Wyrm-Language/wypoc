@@ -175,6 +175,45 @@ def exports(path, roots, seen: "set | None" = None) -> dict:
     return {n: o for n, o in out.items() if not n.startswith("__")}
 
 
+def _function_statics(fn_def) -> set:
+    """A function's statics, as the globals wyrm-v0's compiler makes of them."""
+    return {f"{fn_def.name}::{node.name}" for node in fn_def.walk() if isinstance(node, ast.StaticDecl)}
+
+
+def image_exports(path, roots=None, seen: "set | None" = None) -> set:
+    """The names module `path`'s image would export under wyrm-v0's compiler, read
+    without compiling it: what that compiler needs from `module_exports`, since it
+    numbers slots by these names. Wider than `exports`, which is what `import m::*`
+    offers here: a module also exports what it binds by importing (M1 rule 6), `__`
+    names, and its functions' statics. Generating the images from wypoc and from wyrm-v0
+    and comparing them (`embed-check`) is what holds the two to the same answer."""
+    seen = set() if seen is None else seen
+    resolved = wyrm_modules.resolve_module(list(path), roots)
+    if resolved is None or resolved.file is None or resolved.file in seen:
+        return set()
+    seen.add(resolved.file)
+    tree = _load_tree(resolved.file)
+    if tree is None:
+        return set()
+    out: set = set()
+    for stmt in _top_level(tree):
+        if isinstance(stmt, ast.VarDecl):
+            out.update(target.name for target in stmt.targets)
+        elif isinstance(stmt, (ast.StaticDecl, ast.ClassDef, ast.SignalDef)):
+            out.add(stmt.name)
+        elif isinstance(stmt, (ast.FnDef, ast.CoDef)) and not stmt.class_target:
+            out.add(stmt.name)
+            out.update(_function_statics(stmt))
+        elif isinstance(stmt, ast.Import) and stmt.wildcard:
+            out.add(stmt.path[0])
+            out.update(image_exports(stmt.path, roots, seen) - set(stmt.except_names or ()))
+        elif isinstance(stmt, ast.Import):
+            out.update(_import_bindings(stmt))
+            if stmt.items is not None:
+                out.add(stmt.path[-1])
+    return out
+
+
 _DEFINITIONS = (ast.FnDef, ast.CoDef, ast.ClassDef, ast.VarDecl, ast.StaticDecl,
                 ast.SlotDef, ast.Decorated, ast.Annotate)
 

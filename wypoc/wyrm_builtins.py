@@ -699,6 +699,16 @@ def substr(s, start: int, count: int) -> str:
     return s[start:start + count]
 
 
+def error_message(value):
+    """`error_message(e)` -> the message of error value `e`, or nil for anything
+    else, including an error with no message."""
+    what = value.what if isinstance(value, WyrmError) else None
+    if what is None and is_error(value) and not isinstance(value, WyrmError):
+        cell = value.attrs.get("what")
+        what = cell.value if cell is not None else None
+    return NIL if what is None else what
+
+
 def resize(lst, count: int):
     """(lst ! resize(count)) -> expands or prunes list `lst` in place to
     exactly `count` items: items beyond `count` are dropped, and new items
@@ -971,16 +981,15 @@ def help_(value=None) -> None:
 
 def module_exports(path):
     """`module_exports(path)`: the names module `path` (a `"a::b"` string)
-    exports, sorted - what an `import path::*` offers, read without running
-    the module (project design/modules.md M2). wyrm-v0's compiler places
-    every name before a module runs and reads its dependencies' exports
-    through this; here it is the static reading `names.exports` makes. An
-    error value when the module can't be found."""
+    exports, sorted, read without running the module (project design/modules.md
+    M2). wyrm-v0's compiler places every name before a module runs and reads its
+    dependencies' exports through this, so it answers what that compiler would
+    (`names.image_exports`). An error value when the module can't be found."""
     from wypoc import names, wyrm_modules
     segments = str(path).split("::")
     if wyrm_modules.resolve_module(segments) is None:
         return error(f"module_exports: no module named {str(path)!r}")
-    return sorted(names.exports(segments, None))
+    return sorted(names.image_exports(segments))
 
 
 def install(ctx: dict) -> None:
@@ -1047,6 +1056,9 @@ def install(ctx: dict) -> None:
         # never needs the calling scope.
         parse=parse_source,
         module_exports=module_exports,
+        error_message=error_message,
+        # Also a message (below); wyrm-v0 has both spellings.
+        substr=substr,
     )
     install_native_decorators(ctx)
     register_native_method("substr", substr, ctx)
